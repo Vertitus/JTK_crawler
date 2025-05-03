@@ -2,19 +2,39 @@ import asyncio
 import aiohttp
 import async_timeout
 import aiofiles
-from bs4 import BeautifulSoup, Comment, Doctype
+from aiohttp.client_exceptions import ClientPayloadError, ContentTypeError
+from bs4 import BeautifulSoup
 import re
 import logging
 import os
 import hashlib
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, quote
 from collections import defaultdict
 import json
-import datetime
 import random
 import time
 
-# Конфигурация
+# === Настройки ===
+MAX_CONCURRENT     = 8
+MAX_RETRIES        = 3
+MAX_TOTAL_PAGES    = 10000
+MAX_DEPTH          = 3
+MAX_QUEUE_SIZE     = 10000
+AUTO_SAVE_INTERVAL = 300
+BATCH_SIZE         = 1000  # размер пакета для обработки
+CACHE_DIR          = "cache"
+LOG_DIR            = "logs"
+RESULTS_FILE       = os.path.join(LOG_DIR, "results.json")
+STATS_FILE         = os.path.join(LOG_DIR, "stats.json")
+USER_AGENTS        = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64)...",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)...",
+    "Mozilla/5.0 (X11; Linux x86_64)..."
+]
+TARGET_DOMAINS     = [
+    "fileman.n1e.jp","2ch.net","0ch.net","geocities.jp",
+    "yaplog.jp","nifty.com","ocn.ne.jp","biglobe.ne.jp","pya.cc"
+]
 KEYWORDS = [
     "white face", "pale face", "ghostly smile", "eerie smile", "horrific grin",
     "haunted face", "bloodless smile", "sinister smile", "dead white face",
@@ -44,343 +64,186 @@ KEYWORDS = [
     "笑顔の殺人鬼", "闇の笑顔", "見たら終わり", "白い女", "顔のない笑顔", "人形のような顔",
     "古い恐怖画像", "怪しいスマイル", "昔の怖い写真", "lost horror pic"
 ]
-REGEX_PATTERNS = [
-    re.compile(r"j+e+f+f+\s*t+h+e+\s*k+i+l+l+e+r", re.IGNORECASE),
-]
-TARGET_DOMAINS = [
-    "fileman.n1e.jp", "2ch.net", "0ch.net", "geocities.jp",
-    "yaplog.jp", "nifty.com", "ocn.ne.jp", "biglobe.ne.jp",
-    "pya.cc"
-]  # Ваши целевые домены
 
-MAX_CONCURRENT = 8
-MAX_RETRIES = 3
-MAX_TOTAL_PAGES = 10000
-MAX_DEPTH = 3
-MAX_QUEUE_SIZE = 10000
-AUTO_SAVE_INTERVAL = 300  # 5 минут
-CACHE_DIR = "cache"
-LOG_DIR = "logs"
-RESULTS_FILE = os.path.join(LOG_DIR, "results.json")
-STATS_FILE = os.path.join(LOG_DIR, "stats.json")
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36"
-]
-
+# Создать папки
 os.makedirs(CACHE_DIR, exist_ok=True)
 os.makedirs(LOG_DIR, exist_ok=True)
 
-# Настройка логирования
+# Логирование
 logger = logging.getLogger("Crawler")
 logger.setLevel(logging.DEBUG)
-
-results_logger = logging.getLogger("Results")
-results_logger.setLevel(logging.INFO)
-
-main_handler = logging.FileHandler(
-    os.path.join(LOG_DIR, "crawler.log"), 
-    encoding='utf-8'
-)
-main_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-
-results_handler = logging.FileHandler(
-    RESULTS_FILE,
-    encoding='utf-8'
-)
-results_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-
-logger.addHandler(main_handler)
-results_logger.addHandler(results_handler)
+fh = logging.FileHandler(os.path.join(LOG_DIR, "crawler.log"), encoding="utf-8")
+fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(fh)
 
 # Состояние
 visited = set()
-stats = defaultdict(int)
+stats   = defaultdict(int)
 matches = defaultdict(list)
-performance_metrics = {
-    'processing_times': [],
-    'start_time': time.time()
-}
+
+# Подготовка паттернов
+ALL_PATTERNS = [re.compile(r"j+e+f+f+\s*t+h+e+\s*k+i+l+l+e+r", re.IGNORECASE)]
+for kw in KEYWORDS:
+    esc = re.escape(kw)
+    if all(ord(c) < 128 for c in kw):
+        pat = esc.replace(r'\ ', r'\s+')
+        pat = rf"\b{pat}\b"
+        ALL_PATTERNS.append(re.compile(pat, re.IGNORECASE))
+    else:
+        ALL_PATTERNS.append(re.compile(esc))
 
 class URLTools:
     @staticmethod
-    def normalize_url(url):
-        url = url.split("#")[0].rstrip("/")
-        parsed = urlparse(url)
-        return parsed._replace(
-            path=parsed.path.rstrip("/"),
-            query="",
-            fragment=""
-        ).geturl().lower()
+    def normalize(u: str) -> str:
+        u = u.split("#")[0].rstrip("/")
+        p = urlparse(u)
+        return p._replace(path=p.path.rstrip("/"), query="", fragment="").geturl().lower()
 
     @staticmethod
-    def is_valid_archive_url(url):
-        return "web.archive.org/web/" in url and any(
-            f"/{domain}/" in url for domain in TARGET_DOMAINS
-        )
+    def is_archive(u: str) -> bool:
+        p = urlparse(u)
+        if p.netloc != "web.archive.org":
+            return False
+        m = re.match(r"^/web/\d+/(.+)$", p.path)
+        if not m:
+            return False
+        orig = m.group(1)
+        return any(orig.startswith(f"http://{d}") or orig.startswith(f"https://{d}") for d in TARGET_DOMAINS)
 
 async def fetch_cdx(session, domain):
-    cdx_url = (
-        f"http://web.archive.org/cdx/search/cdx?"
-        f"url={domain}/*&"
-        "matchType=domain&"
-        "filter=statuscode:200&mimetype:text/html&"
-        "from=20040101000000&to=20041231235959&"
-        "collapse=timestamp:6&"
-        "output=json"
+    query = quote(domain + '/*', safe='')
+    url = (
+        f"https://web.archive.org/cdx/search/cdx?url={query}"
+        "&matchType=domain&filter=statuscode:200&mimetype=text/html"
+        "&from=20040101000000&to=20041231235959&collapse=urlkey&output=json"
     )
-    
-    try:
-        async with async_timeout.timeout(30):
-            async with session.get(cdx_url) as response:
-                data = await response.json()
-                if isinstance(data, list):
-                    logger.info(f"Found {len(data)-1} snapshots for {domain}")
-                    return data
-                return []
-    except Exception as e:
-        logger.error(f"CDX Error: {str(e)}")
-        return []
-
-async def get_snapshots(session):
-    snapshots = set()
-    for domain in TARGET_DOMAINS:
+    for attempt in range(MAX_RETRIES):
         try:
-            data = await fetch_cdx(session, domain)
-            if isinstance(data, list) and len(data) >= 2:
-                for entry in data[1:]:
-                    if len(entry) >= 3:
-                        timestamp = entry[1]
-                        original = entry[2]
-                        url = f"http://web.archive.org/web/{timestamp}/{original}"
-                        snap_url = URLTools.normalize_url(url)
-                        snapshots.add(snap_url)
+            hdr = {"User-Agent": random.choice(USER_AGENTS)}
+            async with async_timeout.timeout(60):
+                resp = await session.get(url, headers=hdr)
+            if resp.status != 200:
+                logger.warning(f"CDX {domain} HTTP {resp.status}")
+                await asyncio.sleep(2 ** attempt)
+                continue
+            ct = resp.headers.get("Content-Type", "")
+            if "application/json" not in ct:
+                logger.error(f"CDX {domain} returned non-json: {ct}")
+                return []
+            try:
+                data = await resp.json()
+            except (ClientPayloadError, ContentTypeError, asyncio.IncompleteReadError) as e:
+                logger.warning(f"CDX {domain} payload error on attempt {attempt+1}: {e}")
+                await asyncio.sleep(2 ** attempt)
+                continue
+            if not isinstance(data, list):
+                logger.error(f"CDX {domain} returned unexpected type")
+                return []
+            logger.info(f"{domain}: snapshots = {len(data)-1}")
+            return [entry for entry in data[1:] if len(entry) >= 3]
+        except asyncio.TimeoutError:
+            logger.warning(f"CDX {domain} timed out on attempt {attempt+1}")
         except Exception as e:
-            logger.error(f"Snapshot Error: {str(e)}")
-    
-    logger.info(f"Total snapshots: {len(snapshots)}")
-    return snapshots
+            logger.exception(f"CDX error {domain} on attempt {attempt+1}: {e}")
+        await asyncio.sleep(2 ** attempt)
+    logger.error(f"CDX {domain} failed after {MAX_RETRIES} attempts")
+    return []
+
+async def collect_all_snapshots(session):
+    all_snaps = []
+    for domain in TARGET_DOMAINS:
+        entries = await fetch_cdx(session, domain)
+        for entry in entries:
+            t, orig = entry[1], entry[2]
+            u = URLTools.normalize(f"http://web.archive.org/web/{t}/{orig}")
+            all_snaps.append(u)
+    logger.info(f"Collected total snapshots: {len(all_snaps)}")
+    return all_snaps
 
 async def fetch_page(session, url):
-    url_hash = hashlib.md5(url.encode('utf-8')).hexdigest()
-    cache_path = os.path.join(CACHE_DIR, f"{url_hash}.html")
-    
+    stats['total_pages'] += 1
+    h = hashlib.md5(url.encode()).hexdigest()
+    cache_path = os.path.join(CACHE_DIR, f"{h}.html")
     if os.path.exists(cache_path):
         async with aiofiles.open(cache_path, "r", encoding="utf-8") as f:
             return await f.read()
-    
     for attempt in range(MAX_RETRIES):
         try:
-            headers = {"User-Agent": random.choice(USER_AGENTS)}
-            proxy = os.getenv("HTTP_PROXY")
-            
+            hdr = {"User-Agent": random.choice(USER_AGENTS)}
             async with async_timeout.timeout(30):
-                async with session.get(url, headers=headers, proxy=proxy) as response:
-                    content = await response.text(errors="ignore")
-                    async with aiofiles.open(cache_path, "w", encoding="utf-8") as f:
-                        await f.write(content)
-                    return content
-        except Exception as e:
-            if attempt == MAX_RETRIES - 1:
-                logger.error(f"Failed to fetch {url}: {str(e)}")
+                resp = await session.get(url, headers=hdr)
+            b = await resp.read()
+            txt = b.decode(resp.get_encoding() or 'utf-8', errors='ignore')
+            if resp.status == 200:
+                async with aiofiles.open(cache_path, "w", encoding="utf-8") as f:
+                    await f.write(txt)
+                return txt
+            logger.warning(f"HTTP {resp.status} at {url}")
+            return ""
+        except Exception:
+            logger.exception(f"Fetch error {url} [{attempt+1}/{MAX_RETRIES}]")
             await asyncio.sleep(2 ** attempt)
+    stats['errors'] += 1
     return ""
 
-def calculate_priority(match_count):
-    if match_count == 0:
-        return 0
-    elif 1 <= match_count <= 2:
-        return 1
-    elif 3 <= match_count <= 5:
-        return 2
-    else:
-        return 3
-
-def keyword_search(text):
-    """Ищет ключевые слова и регулярные выражения в тексте."""
-    text_lower = text.lower()
-    found_keywords = [kw for kw in KEYWORDS if kw.lower() in text_lower]
-    
-    for pattern in REGEX_PATTERNS:
-        if pattern.search(text_lower):
-            found_keywords.append(pattern.pattern)
-    
-    return found_keywords if found_keywords else None
-
 async def process_page(session, url, queue, depth):
-    global stats, matches, performance_metrics
-    
-    if stats['total_pages'] >= MAX_TOTAL_PAGES or depth > MAX_DEPTH:
+    html = await fetch_page(session, url)
+    if not html:
         return
-    
-    start_time = time.time()
-    normalized = URLTools.normalize_url(url)
-    
-    if normalized in visited:
-        return
-    
-    visited.add(normalized)
-    stats['total_pages'] += 1
-    
-    logger.info(f"Processing: {normalized} (Depth: {depth})")
-    
-    try:
-        content = await fetch_page(session, url)
-        if not content:
-            stats['errors'] += 1
-            return
-        
-        parse_start = time.time()
-        try:
-            soup = BeautifulSoup(content, 'lxml')
-        except Exception as e:
-            logger.error(f"Parse error: {str(e)}")
-            return
-        
-        match_count = 0
-        
-        def check_text(text, source_type):
-            nonlocal match_count
-            if not text or len(text.strip()) < 3:
-                return
-            
-            found = keyword_search(text)
-            if found:
-                match_count += len(found)
-                match_data = {
-                    "url": normalized,
-                    "text": text[:500] + "..." if len(text) > 500 else text,
-                    "keywords": found,
-                    "source": source_type,
-                    "timestamp": datetime.datetime.now().isoformat()
-                }
-                matches[normalized].append(match_data)
-                results_logger.info(json.dumps(match_data, ensure_ascii=False))
-                stats['matches'] += len(found)
-        
-        # Обработка элементов
-        for element in soup.find_all(string=True):
-            if isinstance(element, Doctype):
-                continue
-            try:
-                text = str(element).strip()
-                if isinstance(element, Comment):
-                    check_text(text, 'comment')
-                else:
-                    check_text(text, 'text')
-            except Exception as e:
-                logger.error(f"Element error: {str(e)}")
-        
-        # Обработка метаданных и изображений
-        for meta in soup.find_all('meta', {"content": True}):
-            check_text(meta['content'], 'meta')
-        
-        for img in soup.find_all('img'):
-            for attr in ['src', 'alt', 'title']:
-                if img.has_attr(attr):
-                    check_text(img[attr], f'img_{attr}')
-        
-        processing_time = time.time() - start_time
-        performance_metrics['processing_times'].append(processing_time)
-        
-        logger.info(f"Processed: {normalized} | Matches: {match_count} | Time: {processing_time:.2f}s")
-        
-        # Добавление новых ссылок с приоритетом
-        if queue.qsize() < MAX_QUEUE_SIZE:
-            for link in soup.find_all('a', href=True):
-                href = urljoin(url, link['href'])
-                normalized_href = URLTools.normalize_url(href)
-                
-                if (URLTools.is_valid_archive_url(href) 
-                    and normalized_href not in visited 
-                    and stats['total_pages'] < MAX_TOTAL_PAGES):
-                    
-                    priority = calculate_priority(match_count)
-                    await queue.put((-priority, depth + 1, normalized_href))
-        else:
-            logger.warning("Queue size limit reached, skipping new links")
-            
-    except Exception as e:
-        stats['errors'] += 1
-        logger.error(f"Processing error: {str(e)}")
+    found = 0
+    for pat in ALL_PATTERNS:
+        ms = pat.findall(html)
+        if ms:
+            found += len(ms)
+            matches[url].extend(ms)
+    if found:
+        stats['matches'] += found
+        logger.info(f"Found {found} hits at {url}")
+    if depth < MAX_DEPTH:
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.find_all("a", href=True):
+            u = URLTools.normalize(urljoin(url, a["href"]))
+            if URLTools.is_archive(u) and u not in visited:
+                await queue.put((depth + 1, u))
 
 async def worker(session, queue):
-    while stats['total_pages'] < MAX_TOTAL_PAGES:
-        try:
-            priority, depth, url = await queue.get()
+    while not queue.empty() and stats['total_pages'] < MAX_TOTAL_PAGES:
+        depth, url = await queue.get()
+        if url not in visited:
+            visited.add(url)
             await process_page(session, url, queue, depth)
-            queue.task_done()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Worker error: {str(e)}")
+        queue.task_done()
 
-async def auto_saver():
+async def auto_save():
     while True:
         await asyncio.sleep(AUTO_SAVE_INTERVAL)
-        try:
-            async with aiofiles.open(RESULTS_FILE, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps({
-                    "stats": dict(stats),
-                    "matches": dict(matches)
-                }, indent=2, ensure_ascii=False))
-            
-            async with aiofiles.open(STATS_FILE, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(dict(stats), indent=2, ensure_ascii=False))
-            
-            logger.info("Auto-save completed")
-        except Exception as e:
-            logger.error(f"Auto-save failed: {str(e)}")
-
-async def metrics_logger():
-    while True:
-        await asyncio.sleep(600)  # 10 минут
-        try:
-            if performance_metrics['processing_times']:
-                avg_time = sum(performance_metrics['processing_times']) / len(performance_metrics['processing_times'])
-                logger.info(f"Metrics | Avg: {avg_time:.2f}s | Total: {stats['total_pages']} | Matches: {stats['matches']}")
-        except Exception as e:
-            logger.error(f"Metrics error: {str(e)}")
+        with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(matches, f, ensure_ascii=False, indent=2)
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2)
+        logger.info("Auto-saved results & stats")
 
 async def main():
-    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT)
-    async with aiohttp.ClientSession(
-        connector=connector,
-        headers={"Accept-Encoding": "gzip, deflate"}
-    ) as session:
-        queue = asyncio.PriorityQueue()
-        
-        logger.info("Initializing snapshots...")
-        snapshots = await get_snapshots(session)
-        logger.info(f"Total initial snapshots: {len(snapshots)}")
-        
-        for url in snapshots:
-            await queue.put((0, 0, URLTools.normalize_url(url)))
-        
-        workers = [asyncio.create_task(worker(session, queue)) for _ in range(MAX_CONCURRENT)]
-        saver = asyncio.create_task(auto_saver())
-        metrics = asyncio.create_task(metrics_logger())
-        
-        try:
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        all_snaps = await collect_all_snapshots(session)
+        total = len(all_snaps)
+        for i in range(0, total, BATCH_SIZE):
+            batch = all_snaps[i:i+BATCH_SIZE]
+            logger.info(f"Processing batch {i//BATCH_SIZE+1} of { (total-1)//BATCH_SIZE+1 }")
+            queue = asyncio.Queue(MAX_QUEUE_SIZE)
+            for u in batch:
+                queue.put_nowait((0, u))
+            workers = [asyncio.create_task(worker(session, queue)) for _ in range(MAX_CONCURRENT)]
             await queue.join()
-        except KeyboardInterrupt:
-            logger.info("Shutting down...")
-        finally:
-            for task in workers:
-                task.cancel()
-            saver.cancel()
-            metrics.cancel()
-            
-            await asyncio.gather(*workers, saver, metrics, return_exceptions=True)
-            
-            async with aiofiles.open(RESULTS_FILE, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps({
-                    "stats": dict(stats),
-                    "matches": dict(matches)
-                }, indent=2, ensure_ascii=False))
-            
-            logger.info("Final results saved")
+            for w in workers:
+                w.cancel()
+        # финальное сохранение
+        with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(matches, f, ensure_ascii=False, indent=2)
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2)
+        logger.info("Crawl completed")
 
 if __name__ == "__main__":
     asyncio.run(main())
