@@ -45,7 +45,7 @@ KEYWORDS = [
     "霊の笑顔", "異形の笑顔", "7-24h2659b", "iup71138", "1123087197322", "プリティフェイス",
     "綺麗な顔", "可愛い顔", "かわいいかお", "きれいなかお", "びがん", "美顔", "ホワイトパウダ", 
     "白い粉", "しろいこな", "白粉", "おしろい", "おたふく", "白い化粧", "しろいけしょう", 
-    "白粉", "おしろい", "おばけのきゅうたろう", "フェイスセット", "普通の姿", "ふつうのすがた"
+    "白粉", "おしろい", "おばけのきゅうたろう", "フェイスセット", "普通の姿", "ふつうのすがた",
     "お多福の面", "prettyFace", "creepy face", "blank stare", "faceless horror", "night smile", "white horror",
     "white ghost", "death smile", "scary smile", "twisted grin", "melted face",
     "paranormal smile", "slasher grin", "bloodless face", "emotionless smile", "doll face",
@@ -76,10 +76,12 @@ fh = logging.FileHandler(os.path.join(LOG_DIR, "crawler.log"), encoding="utf-8")
 fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(fh)
 
-# Состояние
+# Состояние и блокировки
 visited = set()
+visited_lock = asyncio.Lock()
 stats   = defaultdict(int)
 matches = defaultdict(list)
+file_lock = asyncio.Lock()
 
 # Подготовка паттернов
 ALL_PATTERNS = [re.compile(r"j+e+f+f+\s*t+h+e+\s*k+i+l+l+e+r", re.IGNORECASE)]
@@ -126,27 +128,11 @@ async def fetch_cdx(session, domain):
                 logger.warning(f"CDX {domain} HTTP {resp.status}")
                 await asyncio.sleep(2 ** attempt)
                 continue
-            ct = resp.headers.get("Content-Type", "")
-            if "application/json" not in ct:
-                logger.error(f"CDX {domain} returned non-json: {ct}")
-                return []
-            try:
-                data = await resp.json()
-            except (ClientPayloadError, ContentTypeError, asyncio.IncompleteReadError) as e:
-                logger.warning(f"CDX {domain} payload error on attempt {attempt+1}: {e}")
-                await asyncio.sleep(2 ** attempt)
-                continue
-            if not isinstance(data, list):
-                logger.error(f"CDX {domain} returned unexpected type")
-                return []
-            logger.info(f"{domain}: snapshots = {len(data)-1}")
+            data = await resp.json()
             return [entry for entry in data[1:] if len(entry) >= 3]
-        except asyncio.TimeoutError:
-            logger.warning(f"CDX {domain} timed out on attempt {attempt+1}")
-        except Exception as e:
-            logger.exception(f"CDX error {domain} on attempt {attempt+1}: {e}")
-        await asyncio.sleep(2 ** attempt)
-    logger.error(f"CDX {domain} failed after {MAX_RETRIES} attempts")
+        except Exception:
+            logger.exception(f"CDX error {domain} [{attempt+1}/{MAX_RETRIES}]")
+            await asyncio.sleep(2 ** attempt)
     return []
 
 async def collect_all_snapshots(session):
@@ -165,21 +151,21 @@ async def fetch_page(session, url):
     h = hashlib.md5(url.encode()).hexdigest()
     cache_path = os.path.join(CACHE_DIR, f"{h}.html")
     if os.path.exists(cache_path):
-        async with aiofiles.open(cache_path, "r", encoding="utf-8") as f:
-            return await f.read()
+        async with file_lock:
+            async with aiofiles.open(cache_path, "r", encoding="utf-8") as f:
+                return await f.read()
     for attempt in range(MAX_RETRIES):
         try:
-            hdr = {"User-Agent": random.choice(USER_AGENTS)}
-            async with async_timeout.timeout(30):
-                resp = await session.get(url, headers=hdr)
+            resp = await session.get(url, headers={"User-Agent": random.choice(USER_AGENTS)})
             b = await resp.read()
             txt = b.decode(resp.get_encoding() or 'utf-8', errors='ignore')
             if resp.status == 200:
-                async with aiofiles.open(cache_path, "w", encoding="utf-8") as f:
-                    await f.write(txt)
+                async with file_lock:
+                    async with aiofiles.open(cache_path, "w", encoding="utf-8") as f:
+                        await f.write(txt)
                 return txt
-            logger.warning(f"HTTP {resp.status} at {url}")
-            return ""
+            else:
+                return ""
         except Exception:
             logger.exception(f"Fetch error {url} [{attempt+1}/{MAX_RETRIES}]")
             await asyncio.sleep(2 ** attempt)
@@ -198,34 +184,41 @@ async def process_page(session, url, queue, depth):
             matches[url].extend(ms)
     if found:
         stats['matches'] += found
-        logger.info(f"Found {found} hits at {url}")
     if depth < MAX_DEPTH:
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.find_all("a", href=True):
             u = URLTools.normalize(urljoin(url, a["href"]))
-            if URLTools.is_archive(u) and u not in visited:
-                await queue.put((depth + 1, u))
+            if URLTools.is_archive(u):
+                async with visited_lock:
+                    if u not in visited:
+                        await queue.put((depth + 1, u))
 
 async def worker(session, queue):
     while not queue.empty() and stats['total_pages'] < MAX_TOTAL_PAGES:
         depth, url = await queue.get()
-        if url not in visited:
+        async with visited_lock:
+            if url in visited:
+                queue.task_done()
+                continue
             visited.add(url)
-            await process_page(session, url, queue, depth)
+        await process_page(session, url, queue, depth)
         queue.task_done()
 
 async def auto_save():
     while True:
         await asyncio.sleep(AUTO_SAVE_INTERVAL)
-        with open(RESULTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(matches, f, ensure_ascii=False, indent=2)
-        with open(STATS_FILE, "w", encoding="utf-8") as f:
-            json.dump(stats, f, indent=2)
+        async with file_lock:
+            with open(RESULTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(matches, f, ensure_ascii=False, indent=2)
+            with open(STATS_FILE, "w", encoding="utf-8") as f:
+                json.dump(stats, f, indent=2)
         logger.info("Auto-saved results & stats")
 
 async def main():
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT, ssl=False)
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Start autosave task
+        autosave_task = asyncio.create_task(auto_save())
         all_snaps = await collect_all_snapshots(session)
         total = len(all_snaps)
         for i in range(0, total, BATCH_SIZE):
@@ -238,7 +231,8 @@ async def main():
             await queue.join()
             for w in workers:
                 w.cancel()
-        # финальное сохранение
+        # Cancel autosave and final save
+        autosave_task.cancel()
         with open(RESULTS_FILE, "w", encoding="utf-8") as f:
             json.dump(matches, f, ensure_ascii=False, indent=2)
         with open(STATS_FILE, "w", encoding="utf-8") as f:

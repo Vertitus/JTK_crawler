@@ -1,4 +1,4 @@
-TARGETS = [
+KEYWORDS = [
     "white face", "pale face", "ghostly smile", "eerie smile", "horrific grin",
     "haunted face", "bloodless smile", "sinister smile", "dead white face",
     "pale grimace", "spectral face", "frozen smile", "white powder",
@@ -8,7 +8,7 @@ TARGETS = [
     "霊の笑顔", "異形の笑顔", "7-24h2659b", "iup71138", "1123087197322", "プリティフェイス",
     "綺麗な顔", "可愛い顔", "かわいいかお", "きれいなかお", "びがん", "美顔", "ホワイトパウダ", 
     "白い粉", "しろいこな", "白粉", "おしろい", "おたふく", "白い化粧", "しろいけしょう", 
-    "白粉", "おしろい", "おばけのきゅうたろう", "フェイスセット", "普通の姿", "ふつうのすがた"
+    "白粉", "おしろい", "おばけのきゅうたろう", "フェイスセット", "普通の姿", "ふつうのすがた",
     "お多福の面", "prettyFace", "creepy face", "blank stare", "faceless horror", "night smile", "white horror",
     "white ghost", "death smile", "scary smile", "twisted grin", "melted face",
     "paranormal smile", "slasher grin", "bloodless face", "emotionless smile", "doll face",
