@@ -2,6 +2,7 @@ import asyncio
 import logging
 from asyncio import PriorityQueue
 from dataclasses import dataclass, field
+from crawler.wayback_cdx import CDXManager
 
 @dataclass(order=True)
 class PrioritizedItem:
@@ -33,8 +34,20 @@ class Scheduler:
         logging.info("All workers shut down.")
 
     async def _bootstrap_seeds(self):
-        # Пример: добавление стартовых URL
-        for url in self.storage.get_initial_urls():
+        # 1. Инициализация CDXManager
+        cdx_manager = CDXManager(
+            cfg=self.cfg.cdx,  # Конфиг из секции cdx
+            storage=self.storage
+        )
+        
+        # 2. Передача сессии из Fetcher
+        await cdx_manager.initialize(self.fetcher.session)
+        
+        # 3. Получение URL
+        seed_urls = await cdx_manager.get_seed_urls()
+        
+        # 4. Добавление в очередь
+        for url in seed_urls:
             await self.enqueue_url(url, priority=0, depth=0)
 
     async def enqueue_url(self, url, priority=5, depth=0):
@@ -68,7 +81,9 @@ class Scheduler:
             if not content:
                 return
 
-            matches, discovered_urls = await self.parser.parse(content, final_url)
+            matches, discovered_urls = self.parser.parse(content, final_url)
+            if matches:
+                await self.storage.save_matches(final_url, matches)
 
             self.stats.record_match_count(len(matches))
             self.stats.record_url_processed()

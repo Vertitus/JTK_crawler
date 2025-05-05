@@ -1,0 +1,18 @@
+# Блокируемые расширения файлов
+\.(jpg|jpeg|png|gif|webp|svg|ico|bmp|tiff|psd|mp4|avi|mov|wmv|flv|mkv|mp3|wav|aac|ogg|pdf|docx?|xlsx?|pptx?|zip|rar|7z|tar\.gz|exe|dmg|apk)$
+
+# Специфичные пути
+/feed/
+/rss/
+/wp-json/
+/wp-admin/
+/comment/
+/search/
+/archive/
+/tag/
+/category/
+/author/
+
+# Якоря и JS
+^javascript:
+\#

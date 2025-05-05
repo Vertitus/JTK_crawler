@@ -10,13 +10,21 @@ log:
   max_bytes: 10485760
   backup_count: 5
 fetch:
-  user_agents_file: 'user_agents.txt'
+  user_agents_file: "user_agents.txt"
   rate_limit: 1
 storage:
   bloom_capacity: 1000000
   bloom_error_rate: 0.001
   cache_ttl_days: 7
+  cache_dir: "cache"
 parser:
-  patterns_file: 'keywords.txt'
+  keywords_file: "keywords.txt"   # Совпадает с именем поля в классе
+  url_filters: "url_filters.txt"  # Совпадает с именем поля
+  case_sensitive: false 
 scheduler:
   poison_pill: 'STOP'
+cdx:
+  request_timeout: 30       # Таймаут запросов к CDX API (сек)
+  max_pages: 100           # Макс. страниц результатов (5000 URL на страницу)
+  backoff_factor: 2.0      # Экспоненциальная задержка при повторах
+  target_domains_file: "domains.txt"  # Путь к файлу с доменами

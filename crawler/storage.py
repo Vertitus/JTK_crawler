@@ -1,17 +1,21 @@
+from collections import defaultdict, deque
+from typing import List, Deque, Optional, Set, DefaultDict  # Все необходимые импорты
+from pybloom_live import BloomFilter
 import os
-import hashlib
 import json
 import time
-from pybloom_live import BloomFilter
-from collections import deque
-from typing import Set, Optional
+import hashlib
 
 class Storage:
     def __init__(self, cfg):
-        self.cache_dir = cfg.get('cache_dir', 'cache')
-        self.bloom_capacity = cfg.get('bloom_capacity', 1000000)
-        self.bloom_error_rate = cfg.get('bloom_error_rate', 0.001)
-        self.cache_ttl_days = cfg.get('cache_ttl_days', 7)
+        self.cache_dir = cfg.cache_dir
+        self.bloom_capacity = cfg.bloom_capacity
+        self.bloom_error_rate = cfg.bloom_error_rate
+        self.cache_ttl_days = cfg.cache_ttl_days
+        self.bloom_error_rate = cfg.bloom_error_rate
+        self.cache_ttl_days = cfg.cache_ttl_days
+        self.matches: DefaultDict[str, List[str]] = defaultdict(list)  # Аннотация с импортированными типами
+        self.cache_queue: Deque[str] = deque(maxlen=cfg.bloom_capacity)
         
         # Инициализация Bloom filter
         self.bloom = BloomFilter(capacity=self.bloom_capacity, error_rate=self.bloom_error_rate)
@@ -23,6 +27,10 @@ class Storage:
         # Очередь для кэширования старых записей
         self.cache_queue = deque(maxlen=self.bloom_capacity)
         
+    async def save_matches(self, url: str, keywords: List[str]):
+        async with self.lock:
+            self.matches[url].extend(keywords)
+
     def is_visited(self, url: str) -> bool:
         """
         Проверяет, был ли URL уже посещён с помощью Bloom filter.
@@ -92,3 +100,8 @@ class Storage:
         """
         hash_url = hashlib.sha256(url.encode()).hexdigest()
         return os.path.join(self.cache_dir, f"{hash_url}.html")
+    
+    async def persist_matches(self):
+        with open("results.json", "w") as f:
+            json.dump(dict(self.matches), f)
+    

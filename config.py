@@ -5,6 +5,13 @@ from typing import Any
 from pathlib import Path
 
 @dataclass
+class CDXConfig:
+    request_timeout: int
+    max_pages: int
+    backoff_factor: float
+    target_domains_file: str
+
+@dataclass
 class LogConfig:
     path: str
     max_bytes: int
@@ -20,10 +27,13 @@ class StorageConfig:
     bloom_capacity: int
     bloom_error_rate: float
     cache_ttl_days: int
+    cache_dir: str 
 
 @dataclass
 class ParserConfig:
-    patterns_file: str
+    keywords_file: str     # Было: patterns_file
+    url_filters: str       # Новое поле
+    case_sensitive: bool
 
 @dataclass
 class SchedulerConfig:
@@ -43,6 +53,7 @@ class Config:
     storage: StorageConfig
     parser: ParserConfig
     scheduler: SchedulerConfig
+    cdx: CDXConfig
 
 def validate_positive(value, name):
     if value <= 0:
@@ -66,6 +77,7 @@ def load_config(path: str = 'config.yaml') -> Config:
     validate_config(raw)
 
     return Config(
+        cdx=CDXConfig(**raw['cdx']),  # Добавьте эту строку
         max_concurrent=raw['max_concurrent'],
         max_retries=raw['max_retries'],
         max_depth=raw['max_depth'],

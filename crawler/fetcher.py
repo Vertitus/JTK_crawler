@@ -6,11 +6,12 @@ from aiohttp import ClientSession
 from aiohttp.client_exceptions import ClientError
 from typing import List, Tuple
 from .utils import rotate_user_agent
+from crawler.utils import is_valid_mime_type
 
 class Fetcher:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.user_agents = self._load_user_agents(cfg.get('user_agents_file', 'user_agents.txt'))
+        self.user_agents = self._load_user_agents(cfg.user_agents_file)
         self.session: ClientSession = None
         self.rate_limit = cfg.get("rate_limit", 1)
         self.semaphore = asyncio.Semaphore(cfg.get("max_concurrent", 8))  # Ограничение одновременных запросов
@@ -48,6 +49,8 @@ class Fetcher:
 
             except ClientError as e:
                 logging.error(f"Network error while fetching {url}: {e}")
+                return None, url
+            if not is_valid_mime_type(response.headers.get("Content-Type", "")):
                 return None, url
 
     async def close(self):

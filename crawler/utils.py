@@ -1,5 +1,6 @@
 import hashlib
 import mimetypes
+import random
 
 def sha256_hash(url: str) -> str:
     """
@@ -20,3 +21,6 @@ def generate_filename_from_url(url: str) -> str:
     Генерирует имя файла для URL с использованием SHA-256 хэша.
     """
     return sha256_hash(url) + '.html'
+
+def rotate_user_agent(user_agents: list) -> str:
+    return random.choice(user_agents) if user_agents else ""
