@@ -1,0 +1,22 @@
+max_concurrent: 8
+max_retries: 3
+max_depth: 3
+queue_size: 10000
+auto_save_interval: 300
+batch_size: 1000
+cache_dir: 'cache'
+log:
+  path: 'logs/crawler.log'
+  max_bytes: 10485760
+  backup_count: 5
+fetch:
+  user_agents_file: 'user_agents.txt'
+  rate_limit: 1
+storage:
+  bloom_capacity: 1000000
+  bloom_error_rate: 0.001
+  cache_ttl_days: 7
+parser:
+  patterns_file: 'keywords.txt'
+scheduler:
+  poison_pill: 'STOP'
