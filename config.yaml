@@ -41,3 +41,4 @@ cdx:
   max_pages: 100           # Макс. страниц результатов (5000 URL на страницу)
   backoff_factor: 2.0      # Экспоненциальная задержка при повторах
   target_domains_file: "domains.txt"  # Путь к файлу с доменами
+  max_retries: 3 

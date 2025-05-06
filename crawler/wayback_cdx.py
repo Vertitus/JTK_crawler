@@ -21,7 +21,6 @@ class WaybackCDXClient:
         self.request_timeout = request_timeout
         self.max_pages = max_pages
         self.logger = logging.getLogger("CDXClient")
-        self.logger = logging.getLogger("CDXManager")
 
     async def fetch_snapshots(
         self,
@@ -29,7 +28,6 @@ class WaybackCDXClient:
         from_date: str = "20040101000000",
         to_date: str = "20041231235959"
     ) -> List[str]:
-        """Fetch all archived URLs for domain within date range"""
         base_url = "https://web.archive.org/cdx/search/cdx"
         results = []
         collapse = "urlkey"
@@ -37,14 +35,14 @@ class WaybackCDXClient:
         params = {
             "url": f"{domain}/*",
             "matchType": "domain",
-            "filter": "statuscode:200",
-            "mimetype": "text/html",
             "from": from_date,
             "to": to_date,
-            "collapse": collapse,
-            "showResumeKey": "true",
+            "output": "json",
+            "fl": "timestamp,original,statuscode,mimetype",
+            "filter": ["statuscode:200", "mimetype:text/html"],
+            "collapse": "urlkey",
             "limit": page_size,
-            "output": "json"
+            "showResumeKey": "true",
         }
 
         try:
@@ -56,10 +54,19 @@ class WaybackCDXClient:
                         timeout=self.request_timeout
                     ) as response:
                         await self._handle_errors(response)
-                        data = await response.json()
+
+                        try:
+                            data = await response.json(content_type=None)
+                            if not isinstance(data, list):
+                                raise ValueError(f"Non-list JSON response: {data}")
+                        except Exception as e:
+                            text = await response.text()
+                            self.logger.error(f"Invalid JSON response from CDX API for {domain}: {e}")
+                            self.logger.debug(f"Raw response: {text}")
+                            return []
+
                         results.extend(self._process_cdx_response(data))
-                        
-                        # Pagination handling
+
                         while "Resume-Key" in response.headers and len(results) < self.max_pages * page_size:
                             params["resumeKey"] = response.headers["Resume-Key"]
                             async with self.session.get(
@@ -68,9 +75,19 @@ class WaybackCDXClient:
                                 timeout=self.request_timeout
                             ) as paginated_response:
                                 await self._handle_errors(paginated_response)
-                                data = await paginated_response.json()
+
+                                try:
+                                    data = await paginated_response.json(content_type=None)
+                                    if not isinstance(data, list):
+                                        raise ValueError(f"Non-list JSON response: {data}")
+                                except Exception as e:
+                                    text = await paginated_response.text()
+                                    self.logger.error(f"Invalid JSON response during pagination for {domain}: {e}")
+                                    self.logger.debug(f"Raw response: {text}")
+                                    break
+
                                 results.extend(self._process_cdx_response(data))
-                                
+
                         return list(set(results))[:self.max_pages * page_size]
 
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -85,26 +102,23 @@ class WaybackCDXClient:
             return []
 
     def _process_cdx_response(self, data: list) -> List[str]:
-        """Process raw CDX API response"""
         if not data or len(data) < 2:
             return []
 
         urls = []
-        for entry in data[1:]:  # Skip header
-            if len(entry) >= 5:
-                timestamp = entry[1]
-                original = entry[2]
+        for entry in data[1:]:
+            if len(entry) >= 2:
+                timestamp = entry[0]
+                original = entry[1]
                 url = self._build_wayback_url(timestamp, original)
                 urls.append(url)
         return urls
 
     def _build_wayback_url(self, timestamp: str, original_url: str) -> str:
-        """Build normalized Wayback Machine URL"""
         encoded = quote(original_url, safe=":/")
         return f"http://web.archive.org/web/{timestamp}id_/{encoded}"
 
     async def _handle_errors(self, response: aiohttp.ClientResponse):
-        """Handle HTTP errors and rate limits"""
         if response.status == 429:
             retry_after = int(response.headers.get("Retry-After", 60))
             self.logger.warning(f"Rate limited. Retrying after {retry_after}s")
@@ -129,6 +143,7 @@ class CDXManager:
         self.cfg = cfg
         self.storage = storage
         self.client: Optional[WaybackCDXClient] = None
+        self.logger = logging.getLogger("CDXManager")
 
     async def initialize(self, session: aiohttp.ClientSession):
         self.client = WaybackCDXClient(
@@ -140,23 +155,21 @@ class CDXManager:
         )
 
     async def get_seed_urls(self) -> List[str]:
-        """Get all seed URLs from Wayback Machine"""
         if not self.client:
             raise RuntimeError("CDXClient not initialized")
 
         domains = self._load_domains()
         all_urls = []
-        
+
         for domain in domains:
             self.logger.info(f"Fetching CDX for {domain}")
             urls = await self.client.fetch_snapshots(domain)
             filtered = await self._filter_new_urls(urls)
             all_urls.extend(filtered)
-            
+
         return all_urls
 
     def _load_domains(self) -> List[str]:
-        """Load target domains from file"""
         try:
             with open(self.cfg.target_domains_file, "r") as f:
                 return [line.strip() for line in f if line.strip()]
@@ -165,5 +178,4 @@ class CDXManager:
             return []
 
     async def _filter_new_urls(self, urls: List[str]) -> List[str]:
-        """Filter URLs using Bloom filter"""
         return [url for url in urls if not self.storage.is_visited(url)]

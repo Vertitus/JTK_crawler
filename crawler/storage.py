@@ -13,8 +13,6 @@ class Storage:
         self.bloom_capacity = cfg.bloom_capacity
         self.bloom_error_rate = cfg.bloom_error_rate
         self.cache_ttl_days = cfg.cache_ttl_days
-        self.bloom_error_rate = cfg.bloom_error_rate
-        self.cache_ttl_days = cfg.cache_ttl_days
         self.matches: DefaultDict[str, List[str]] = defaultdict(list)  # Аннотация с импортированными типами
         self.cache_queue: Deque[str] = deque(maxlen=cfg.bloom_capacity)
         self.visited_lock = asyncio.Lock()

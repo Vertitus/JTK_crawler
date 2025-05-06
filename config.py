@@ -11,6 +11,7 @@ class CDXConfig:
     max_pages: int
     backoff_factor: float
     target_domains_file: str
+    max_retries: int
 
 @dataclass
 class LogConfig:
@@ -43,7 +44,7 @@ class SchedulerConfig:
     max_concurrent: int
     max_depth: int
     queue_size: int
-
+    cdx: CDXConfig 
 
 
 @dataclass
@@ -96,5 +97,5 @@ def load_config(path: str = 'config.yaml') -> Config:
         fetch=FetchConfig(**raw['fetch']),
         storage=StorageConfig(**raw['storage']),
         parser=ParserConfig(**raw['parser']),
-        scheduler=SchedulerConfig(**raw['scheduler'])
+        scheduler=SchedulerConfig(**raw['scheduler'], cdx=CDXConfig(**raw['cdx']))
     )

@@ -15,7 +15,7 @@ async def main():
     storage = Storage(cfg.storage)
     fetcher = Fetcher(cfg.fetch)
     parser = Parser(cfg.parser)
-    scheduler = Scheduler(cfg.scheduler, storage, fetcher, parser, stats)
+    scheduler = Scheduler(cfg.scheduler, cfg.cdx, storage, fetcher, parser, stats)
 
     setup_signal_handlers(scheduler.shutdown)
     await scheduler.run()
