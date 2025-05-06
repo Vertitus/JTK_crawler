@@ -1,5 +1,5 @@
 from collections import defaultdict, deque
-from typing import List, Deque, Optional, Set, DefaultDict  # Все необходимые импорты
+from typing import List, Deque, Optional, Set, DefaultDict
 from pybloom_live import BloomFilter
 import os
 import json
@@ -8,20 +8,21 @@ import hashlib
 import asyncio
 
 class Storage:
-    def __init__(self, cfg):
+    def __init__(self, cfg, stats):
+        self.cfg = cfg
+        self.stats = stats
         self.cache_dir = cfg.cache_dir
         self.bloom_capacity = cfg.bloom_capacity
         self.bloom_error_rate = cfg.bloom_error_rate
         self.cache_ttl_days = cfg.cache_ttl_days
-        self.matches: DefaultDict[str, List[str]] = defaultdict(list)  # Аннотация с импортированными типами
+        self.matches: DefaultDict[str, List[str]] = defaultdict(list)
         self.cache_queue: Deque[str] = deque(maxlen=cfg.bloom_capacity)
         self.visited_lock = asyncio.Lock()
         self.lock = asyncio.Lock()
         
-        # Инициализация Bloom filter
-        self.bloom = BloomFilter(capacity=self.bloom_capacity, error_rate=self.bloom_error_rate)
+        self.bloom = BloomFilter(capacity=self.bloom_capacity, 
+                               error_rate=self.bloom_error_rate)
         
-        # Директория для кэша
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
         

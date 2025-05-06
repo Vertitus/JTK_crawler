@@ -99,6 +99,7 @@ class WaybackCDXClient:
 
         except Exception as e:
             self.logger.error(f"Failed to fetch CDX for {domain}: {str(e)}")
+            self.logger.debug(f"Params: {params}")
             return []
 
     def _process_cdx_response(self, data: list) -> List[str]:
@@ -162,10 +163,22 @@ class CDXManager:
         all_urls = []
 
         for domain in domains:
-            self.logger.info(f"Fetching CDX for {domain}")
-            urls = await self.client.fetch_snapshots(domain)
-            filtered = await self._filter_new_urls(urls)
-            all_urls.extend(filtered)
+            try:
+                self.logger.info(f"Fetching CDX for {domain}")
+                urls = await self.client.fetch_snapshots(domain)
+                filtered = await self._filter_new_urls(urls)
+                
+                await self.storage.stats.add_snapshots(
+                    total=len(urls),
+                    new=len(filtered)
+                )
+                
+                all_urls.extend(filtered)
+                
+            except Exception as e:
+                self.logger.error(f"Failed to process domain {domain}: {str(e)}")
+                await self.storage.stats.add_failed_domain(domain)
+                continue
 
         return all_urls
 
@@ -179,3 +192,5 @@ class CDXManager:
 
     async def _filter_new_urls(self, urls: List[str]) -> List[str]:
         return [url for url in urls if not self.storage.is_visited(url)]
+    
+    

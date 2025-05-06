@@ -5,7 +5,8 @@ from pathlib import Path
 
 def init_logger(cfg):
     log_path = Path(cfg.path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not log_path.parent.exists():
+        log_path.parent.mkdir(parents=True, exist_ok=True)
 
     handler = RotatingFileHandler(
         filename=cfg.path,
@@ -24,7 +25,8 @@ def init_logger(cfg):
     root.addHandler(handler)
     # также лог в stdout (можно отключить)
     console = logging.StreamHandler()
-    console.setFormatter(formatter)
+    console.setLevel(logging.DEBUG)
+    # console.setFormatter(formatter)
     root.addHandler(console)
 
     logging.info("Logger initialized")

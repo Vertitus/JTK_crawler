@@ -39,12 +39,15 @@ class ParserConfig:
 
 @dataclass
 class SchedulerConfig:
+    
     seeds: List[str]
     poison_pill: str
     max_concurrent: int
     max_depth: int
     queue_size: int
     cdx: CDXConfig 
+
+    debug: bool = False
 
 
 @dataclass

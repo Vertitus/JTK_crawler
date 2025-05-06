@@ -3,6 +3,7 @@ import logging
 from asyncio import PriorityQueue
 from dataclasses import dataclass, field
 from crawler.wayback_cdx import CDXManager
+from typing import List, Dict, Optional
 
 @dataclass(order=True)
 class PrioritizedItem:
@@ -58,6 +59,8 @@ class Scheduler:
             cdx = CDXManager(self.cdx_cfg, self.storage)
             await cdx.initialize(self.fetcher.session)
             seed_urls = await cdx.get_seed_urls()
+            await self.stats.set_total_urls(len(seed_urls))
+            print("Seed URLs:", seed_urls)
             for url in seed_urls:
                 await self.enqueue_url(url, priority=0, depth=0)
         except Exception as e:
@@ -104,41 +107,85 @@ class Scheduler:
         Обрабатывает один URL: скачивает контент, парсит, сохраняет результаты и добавляет новые URL.
         """
         try:
+            # Скачиваем контент
             content, final_url = await self.fetcher.fetch(url)
             if not content:
                 return
 
+            # Парсим HTML
             matches, discovered_urls = self.parser.parse(content, final_url)
+
+            # Сохраняем совпадения ключевых слов
             if matches:
                 await self.storage.save_matches(final_url, matches)
 
-            self.stats.record_match_count(len(matches))
-            self.stats.record_url_processed()
+            # Обновляем статистику и прогресс
+            await self.stats.increment_processed()
+            progress = await self.stats.get_progress()
+            current_processed = await self.stats.get("processed_urls")
+            total_urls = await self.stats.get("total_urls")
 
+            logging.info(
+                f"Progress: {progress:.2f}% | "
+                f"Processed: {current_processed}/{total_urls} | "
+                f"URL: {final_url}"
+            )
+
+            # Фиксируем метрики
+            await self.stats.increment("match_count", len(matches))
+            await self.stats.increment("processed_urls")
+
+            # Добавляем новые URL в очередь
             for new_url in discovered_urls:
                 await self.enqueue_url(new_url, priority=10, depth=depth + 1)
+
+        except Exception as e:
+            # Фиксируем ошибку и логируем
+            await self.stats.increment("error_count")
+            logging.exception(f"Failed to process {url}: {str(e)}")
+            if self.scheduler_cfg.debug:
+                logging.debug(f"Error context - Content: {content[:200]}...")
 
         except Exception as e:
             self.stats.record_error(e)
             logging.exception(f"Failed to process {url}: {e}")
 
-    async def shutdown(self):
+    # crawler/scheduler.py
+    async def shutdown(self):  # <-- Добавьте этот метод
         """
-        Корректное завершение работы: отправка poison-pill воркерам, сохранение данных.
+        Корректное завершение работы планировщика.
         """
         if not self.is_running:
             return
-        logging.info("Shutting down scheduler...")
+        
         self.is_running = False
-
+        logging.info("Shutting down scheduler...")
+        
         # Отправляем poison-pill каждому воркеру
-        for _ in self.workers:
+        for _ in range(self.scheduler_cfg.max_concurrent):
             await self.queue.put(PrioritizedItem(priority=100, depth=0, url=self.poison_pill))
-
-        # Ждём завершения
+        
+        # Ожидаем завершения задач
         await asyncio.gather(*self.workers, return_exceptions=True)
-
-        # Сохраняем состояния
-        await self.storage.persist()
-        await self.stats.persist()
-        logging.info("Scheduler shutdown complete.")
+        
+        # Выводим статистику
+        total_snapshots = self.storage.stats.total_snapshots
+        new_snapshots = self.storage.stats.new_snapshots
+        processed = await self.stats.get("processed_urls")
+        matches = await self.stats.get("match_count")
+        failed_domains = await self.storage.stats.get_failed_domains()
+        
+        logging.info("\n=== Final Statistics ===")
+        logging.info(f"Total snapshots found:     {total_snapshots}")
+        logging.info(f"New snapshots processed:   {new_snapshots}")
+        logging.info(f"URLs crawled:              {processed}")
+        logging.info(f"Keyword matches found:     {matches}")
+        
+        if failed_domains:
+            logging.info("\n=== Problem Domains ===")
+            for domain in failed_domains:
+                logging.info(f" - {domain}")
+        
+        # Закрываем соединения
+        await self.fetcher.close()
+        await self.storage.persist_matches()
