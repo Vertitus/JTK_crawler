@@ -2,6 +2,7 @@
 import yaml
 from dataclasses import dataclass
 from typing import Any
+from typing import List, Tuple
 from pathlib import Path
 
 @dataclass
@@ -31,13 +32,19 @@ class StorageConfig:
 
 @dataclass
 class ParserConfig:
-    keywords_file: str     # Было: patterns_file
+    patterns_file: str     # Было: patterns_file
     url_filters: str       # Новое поле
     case_sensitive: bool
 
 @dataclass
 class SchedulerConfig:
+    seeds: List[str]
     poison_pill: str
+    max_concurrent: int
+    max_depth: int
+    queue_size: int
+
+
 
 @dataclass
 class Config:

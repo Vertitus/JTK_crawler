@@ -17,11 +17,11 @@ class Scheduler:
         self.fetcher = fetcher
         self.parser = parser
         self.stats = stats
-        self.queue = PriorityQueue(maxsize=cfg.get("queue_size", 10000))
+        self.queue      = PriorityQueue(maxsize=cfg.queue_size)
         self.workers = []
         self.is_running = True
-        self.poison_pill = cfg.get("poison_pill", "STOP")
-        self.max_depth = cfg.get("max_depth", 3)
+        self.poison_pill = cfg.poison_pill
+        self.max_depth  = cfg.max_depth
 
     async def run(self):
         await self._bootstrap_seeds()
@@ -34,21 +34,9 @@ class Scheduler:
         logging.info("All workers shut down.")
 
     async def _bootstrap_seeds(self):
-        # 1. Инициализация CDXManager
-        cdx_manager = CDXManager(
-            cfg=self.cfg.cdx,  # Конфиг из секции cdx
-            storage=self.storage
-        )
-        
-        # 2. Передача сессии из Fetcher
-        await cdx_manager.initialize(self.fetcher.session)
-        
-        # 3. Получение URL
-        seed_urls = await cdx_manager.get_seed_urls()
-        
-        # 4. Добавление в очередь
-        for url in seed_urls:
+        for url in self.cfg.seeds:
             await self.enqueue_url(url, priority=0, depth=0)
+
 
     async def enqueue_url(self, url, priority=5, depth=0):
         if depth > self.max_depth:
