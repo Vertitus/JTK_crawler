@@ -5,6 +5,7 @@ import os
 import json
 import time
 import hashlib
+import asyncio
 
 class Storage:
     def __init__(self, cfg):
@@ -16,6 +17,8 @@ class Storage:
         self.cache_ttl_days = cfg.cache_ttl_days
         self.matches: DefaultDict[str, List[str]] = defaultdict(list)  # Аннотация с импортированными типами
         self.cache_queue: Deque[str] = deque(maxlen=cfg.bloom_capacity)
+        self.visited_lock = asyncio.Lock()
+        self.lock = asyncio.Lock()
         
         # Инициализация Bloom filter
         self.bloom = BloomFilter(capacity=self.bloom_capacity, error_rate=self.bloom_error_rate)

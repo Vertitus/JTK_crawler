@@ -26,7 +26,7 @@ class Scheduler:
     async def run(self):
         await self._bootstrap_seeds()
 
-        for _ in range(self.cfg.get("max_concurrent", 8)):
+        for _ in range(self.cfg.max_concurrent):
             worker = asyncio.create_task(self._worker_loop())
             self.workers.append(worker)
 
@@ -44,7 +44,7 @@ class Scheduler:
         async with self.storage.visited_lock:
             if self.storage.is_visited(url):
                 return
-            self.storage.mark_visited(url)
+            self.storage.add_visited(url)
 
         item = PrioritizedItem(priority, depth, url)
         await self.queue.put(item)
