@@ -33,6 +33,13 @@ class Stats:
         async with self._lock:
             return self._counters.get(key, 0)
 
+    def set_total_urls(self, total: int):
+        """
+        Устанавливает общее количество URL, ожидающих обработки.
+        Это позволяет затем отслеживать прогресс.
+        """
+        self.total_urls = total
+
     async def snapshot(self) -> Dict[str, int]:
         async with self._lock:
             return dict(self._counters)

@@ -74,6 +74,10 @@ class Fetcher:
         except ClientError as e:
             logging.error(f"Network error while fetching {url}: {e}")
             return None, url
+        
+        if not response or response.status != 200:
+            logger.warning(f"Bad response for {domain}: {response}")
+            return None
 
     async def close(self):
         """
