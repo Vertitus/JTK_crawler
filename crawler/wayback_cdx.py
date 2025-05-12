@@ -13,13 +13,15 @@ class WaybackCDXClient:
         max_retries: int = 3,
         backoff_factor: float = 2.0,
         request_timeout: int = 30,
-        max_pages: int = 100
+        max_pages: int = 100,
+        page_size: int = 5000
     ):
         self.session = session
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.request_timeout = request_timeout
-        self.max_pages = max_pages
+        self.max_pages = max_pages    # 0 = no limit on pages
+        self.page_size = page_size    # number of URLs per request
         self.logger = logging.getLogger("CDXClient")
 
     async def fetch_snapshots(
@@ -29,9 +31,7 @@ class WaybackCDXClient:
         to_date: str = "20041231235959"
     ) -> List[str]:
         base_url = "https://web.archive.org/cdx/search/cdx"
-        results = []
-        collapse = "urlkey"
-        page_size = 5000
+        results: List[str] = []
         params = {
             "url": f"{domain}/*",
             "matchType": "domain",
@@ -41,7 +41,7 @@ class WaybackCDXClient:
             "fl": "timestamp,original,statuscode,mimetype",
             "filter": ["statuscode:200", "mimetype:text/html"],
             "collapse": "urlkey",
-            "limit": page_size,
+            "limit": self.page_size,
             "showResumeKey": "true",
         }
 
@@ -67,7 +67,9 @@ class WaybackCDXClient:
 
                         results.extend(self._process_cdx_response(data))
 
-                        while "Resume-Key" in response.headers and len(results) < self.max_pages * page_size:
+                        # Pagination: follow Resume-Key until no more or page limit reached
+                        page = 1
+                        while "Resume-Key" in response.headers and (self.max_pages == 0 or page < self.max_pages):
                             params["resumeKey"] = response.headers["Resume-Key"]
                             async with self.session.get(
                                 base_url,
@@ -87,8 +89,15 @@ class WaybackCDXClient:
                                     break
 
                                 results.extend(self._process_cdx_response(data))
+                                page += 1
 
-                        return list(set(results))[:self.max_pages * page_size]
+                        # Deduplicate and apply optional total limit
+                        unique = list(dict.fromkeys(results))  # preserve order
+                        if self.max_pages > 0:
+                            unique = unique[: self.max_pages * self.page_size]
+
+                        self.logger.info(f"Fetched {len(unique)} snapshots for domain {domain}")
+                        return unique
 
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     if attempt == self.max_retries:
@@ -106,13 +115,11 @@ class WaybackCDXClient:
         if not data or len(data) < 2:
             return []
 
-        urls = []
+        urls: List[str] = []
         for entry in data[1:]:
             if len(entry) >= 2:
-                timestamp = entry[0]
-                original = entry[1]
-                url = self._build_wayback_url(timestamp, original)
-                urls.append(url)
+                timestamp, original = entry[0], entry[1]
+                urls.append(self._build_wayback_url(timestamp, original))
         return urls
 
     def _build_wayback_url(self, timestamp: str, original_url: str) -> str:
@@ -152,7 +159,8 @@ class CDXManager:
             max_retries=self.cfg.max_retries,
             backoff_factor=self.cfg.backoff_factor,
             request_timeout=self.cfg.request_timeout,
-            max_pages=self.cfg.max_pages
+            max_pages=self.cfg.max_pages,
+            page_size=self.cfg.page_size
         )
 
     async def get_seed_urls(self) -> List[str]:
@@ -160,21 +168,25 @@ class CDXManager:
             raise RuntimeError("CDXClient not initialized")
 
         domains = self._load_domains()
-        all_urls = []
+        self.logger.info(f"Will bootstrap seeds for {len(domains)} domains")
 
+        all_urls: List[str] = []
         for domain in domains:
             try:
                 self.logger.info(f"Fetching CDX for {domain}")
                 urls = await self.client.fetch_snapshots(domain)
+                self.logger.info(f"  → raw snapshots: {len(urls)}")
+
                 filtered = await self._filter_new_urls(urls)
-                
+                self.logger.info(f"  → new (unvisited): {len(filtered)}")
+
                 await self.storage.stats.add_snapshots(
                     total=len(urls),
                     new=len(filtered)
                 )
-                
+
                 all_urls.extend(filtered)
-                
+
             except Exception as e:
                 self.logger.error(f"Failed to process domain {domain}: {str(e)}")
                 await self.storage.stats.add_failed_domain(domain)
@@ -192,5 +204,3 @@ class CDXManager:
 
     async def _filter_new_urls(self, urls: List[str]) -> List[str]:
         return [url for url in urls if not self.storage.is_visited(url)]
-    
-    

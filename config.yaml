@@ -39,7 +39,8 @@ scheduler:
   queue_size: 10000
 cdx:
   request_timeout: 30       # Таймаут запросов к CDX API (сек)
-  max_pages: 200           # Макс. страниц результатов (5000 URL на страницу)
+  max_pages: 0   
+  page_size: 500000         # Макс. страниц результатов (5000 URL на страницу)
   backoff_factor: 2.0      # Экспоненциальная задержка при повторах
   target_domains_file: "domains.txt"  # Путь к файлу с доменами
   max_retries: 3 

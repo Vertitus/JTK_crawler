@@ -12,6 +12,7 @@ class CDXConfig:
     backoff_factor: float
     target_domains_file: str
     max_retries: int
+    page_size: int
 
 @dataclass
 class LogConfig:

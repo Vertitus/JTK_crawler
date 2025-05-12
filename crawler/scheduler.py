@@ -29,6 +29,9 @@ class Scheduler:
         self.parser        = parser
         self.stats         = stats
 
+        import logging
+        self.logger = logging.getLogger("Scheduler")
+
         self.queue        = PriorityQueue(maxsize=scheduler_cfg.queue_size)
         self.workers      = []
         self.is_running   = True
@@ -54,101 +57,101 @@ class Scheduler:
         """
         Загружает начальные URL: сначала из Wayback Machine, затем из конфигурации.
         """
-        # Семена из Wayback CDX по target_domains_file за 2004 год
         try:
             cdx = CDXManager(self.cdx_cfg, self.storage)
             await cdx.initialize(self.fetcher.session)
+            self.logger.info("Bootstrapping seeds from CDX...")
             seed_urls = await cdx.get_seed_urls()
+            self.logger.info(f"Total seed URLs from CDX: {len(seed_urls)}")
+            
+            # Устанавливаем общее число URL для прогресса
             await self.stats.set_total_urls(len(seed_urls))
-            print("Seed URLs:", seed_urls)
+            
             for url in seed_urls:
                 await self.enqueue_url(url, priority=0, depth=0)
         except Exception as e:
-            logging.error(f"Failed to bootstrap from CDX: {e}")
+            self.logger.error(f"Failed to bootstrap from CDX: {e}")
 
         # Обычные семена из конфигурации
+        self.logger.info(f"Adding {len(self.scheduler_cfg.seeds)} static seed URLs")
         for url in self.scheduler_cfg.seeds:
             await self.enqueue_url(url, priority=0, depth=0)
 
     async def enqueue_url(self, url: str, priority: int = 5, depth: int = 0):
-        """
-        Добавляет URL в очередь, если глубина не превышена и URL ещё не посещён.
-        """
-        if depth > self.max_depth:
-            return
-        # Защита от повторного посещения
-        async with self.storage.visited_lock:
-            if self.storage.is_visited(url):
+            """
+            Добавляет URL в очередь, если глубина не превышена и URL ещё не посещён.
+            """
+            # Ограничение глубины
+            if depth > self.max_depth:
                 return
-            self.storage.add_visited(url)
-
-        item = PrioritizedItem(priority, depth, url)
-        await self.queue.put(item)
+    
+            # Защита от повторного посещения
+            async with self.storage.visited_lock:
+                if self.storage.is_visited(url):
+                    return
+                self.storage.add_visited(url)
+    
+            # Помещаем в очередь
+            item = PrioritizedItem(priority, depth, url)
+            await self.queue.put(item)
 
     async def _worker_loop(self):
         """
         Основной цикл воркера: извлекает URL из очереди и обрабатывает их.
         """
+        worker_name = asyncio.current_task().get_name()
         while self.is_running:
             try:
                 item = await asyncio.wait_for(self.queue.get(), timeout=5)
+                self.logger.info(f"[{worker_name}] Dequeued URL: {item.url} (depth={item.depth})")
             except asyncio.TimeoutError:
                 continue
 
             if item.url == self.poison_pill:
-                logging.info("Received poison pill, stopping worker.")
+                self.logger.info(f"[{worker_name}] Received poison pill, stopping.")
                 break
 
             await self._process_url(item.url, item.depth)
             self.queue.task_done()
+
 
     async def _process_url(self, url: str, depth: int):
         """
         Обрабатывает один URL: скачивает контент, парсит, сохраняет результаты и добавляет новые URL.
         """
         try:
-            # Скачиваем контент
             content, final_url = await self.fetcher.fetch(url)
             if not content:
+                self.logger.warning(f"No content for {url}, skipping.")
                 return
 
-            # Парсим HTML
-            matches, discovered_urls = self.parser.parse(content, final_url)
+            self.logger.info(f"Fetched {len(content)} bytes from {final_url}")
 
-            # Сохраняем совпадения ключевых слов
+            matches, discovered_urls = self.parser.parse(content, final_url)
             if matches:
                 await self.storage.save_matches(final_url, matches)
+                self.logger.info(f"  → {len(matches)} keyword matches at {final_url}")
 
-            # Обновляем статистику и прогресс
-            await self.stats.increment_processed()
-            progress = await self.stats.get_progress()
-            current_processed = await self.stats.get("processed_urls")
-            total_urls = await self.stats.get("total_urls")
-
-            logging.info(
-                f"Progress: {progress:.2f}% | "
-                f"Processed: {current_processed}/{total_urls} | "
-                f"URL: {final_url}"
-            )
-
-            # Фиксируем метрики
-            await self.stats.increment("match_count", len(matches))
+            # Обновляем статистику
             await self.stats.increment("processed_urls")
+            processed = await self.stats.get("processed_urls")
+            total = await self.stats.get_total_urls()
+            pct = (processed / total * 100) if total else 0
+            self.logger.info(f"Progress: {processed}/{total} URLs ({pct:.2f}%)")
 
-            # Добавляем новые URL в очередь
+            # Фиксируем количество совпадений
+            await self.stats.increment("match_count", len(matches))
+
+            # Логируем найденные ссылки и ставим их в очередь
             for new_url in discovered_urls:
-                await self.enqueue_url(new_url, priority=10, depth=depth + 1)
+                self.logger.debug(f"Discovered URL: {new_url}")
+                await self.enqueue_url(new_url, priority=depth + 1, depth=depth + 1)
 
         except Exception as e:
-            # Фиксируем ошибку и логируем
+            # Учёт ошибок
             await self.stats.increment("error_count")
-            logging.exception(f"Failed to process {url}: {str(e)}")
-            if self.scheduler_cfg.debug:
-                logging.debug(f"Error context - Content: {content[:200]}...")
+            self.logger.exception(f"Error processing {url}: {e}")
 
-        except Exception as e:
-            self.stats.record_error(e)
-            logging.exception(f"Failed to process {url}: {e}")
 
     # crawler/scheduler.py
     async def shutdown(self):  # <-- Добавьте этот метод

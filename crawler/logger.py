@@ -8,25 +8,32 @@ def init_logger(cfg):
     if not log_path.parent.exists():
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    handler = RotatingFileHandler(
+    # Файл-логирование на INFO и выше
+    file_handler = RotatingFileHandler(
         filename=cfg.path,
         maxBytes=cfg.max_bytes,
         backupCount=cfg.backup_count,
         encoding='utf-8'
     )
-    formatter = logging.Formatter(
+    file_formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    handler.setFormatter(formatter)
+    file_handler.setFormatter(file_formatter)
+    file_handler.setLevel(logging.INFO)
+
+    # Логирование в консоль на DEBUG и выше
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    console_formatter = logging.Formatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    console_handler.setFormatter(console_formatter)
 
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    root.addHandler(handler)
-    # также лог в stdout (можно отключить)
-    console = logging.StreamHandler()
-    console.setLevel(logging.DEBUG)
-    # console.setFormatter(formatter)
-    root.addHandler(console)
+    root.setLevel(logging.DEBUG)      # корневой логгер на DEBUG
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
 
-    logging.info("Logger initialized")
+    root.info("Logger initialized")
