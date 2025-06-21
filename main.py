@@ -17,6 +17,7 @@ async def log_progress(stats: Stats):
 
 async def main():
     try:
+        logging.basicConfig(level=logging.DEBUG)
         print("[1/5] Loading config...")
         cfg = load_config('config.yaml')
         
@@ -46,7 +47,10 @@ async def main():
         
         # Остановка задачи прогресса
         progress_task.cancel()
-        await asyncio.sleep(1)
+        try:
+            await progress_task
+        except asyncio.CancelledError:
+            pass
         print("=== Crawler finished ===")
 
     except Exception as e:

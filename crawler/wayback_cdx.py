@@ -1,4 +1,3 @@
-# crawler/wayback_cdx.py
 import aiohttp
 import asyncio
 import logging
@@ -27,10 +26,10 @@ class WaybackCDXClient:
     async def fetch_snapshots(
         self,
         domain: str,
-        from_date: str = "20040101000000",
-        to_date: str = "20041231235959"
+        from_date: str = "20050101000000",
+        to_date: str = "20051231235959"
     ) -> List[str]:
-        base_url = "https://web.archive.org/cdx/search/cdx"
+        base_url = "http://web.archive.org/cdx/search/cdx"
         results: List[str] = []
         params = {
             "url": f"{domain}/*",
@@ -45,71 +44,72 @@ class WaybackCDXClient:
             "showResumeKey": "true",
         }
 
-        try:
-            for attempt in range(self.max_retries + 1):
-                try:
-                    async with self.session.get(
-                        base_url,
-                        params=params,
-                        timeout=self.request_timeout
-                    ) as response:
-                        await self._handle_errors(response)
+        timeout = aiohttp.ClientTimeout(total=self.request_timeout)
 
-                        try:
-                            data = await response.json(content_type=None)
-                            if not isinstance(data, list):
-                                raise ValueError(f"Non-list JSON response: {data}")
-                        except Exception as e:
-                            text = await response.text()
-                            self.logger.error(f"Invalid JSON response from CDX API for {domain}: {e}")
-                            self.logger.debug(f"Raw response: {text}")
-                            return []
+        for attempt in range(self.max_retries + 1):
+            try:
+                async with self.session.get(
+                    base_url,
+                    params=params,
+                    timeout=timeout
+                ) as response:
+                    await self._handle_errors(response)
 
-                        results.extend(self._process_cdx_response(data))
+                    # parse JSON response
+                    try:
+                        data = await response.json(content_type=None)
+                        if not isinstance(data, list):
+                            raise ValueError(f"Non-list JSON response: {data}")
+                    except Exception as e:
+                        text = await response.text()
+                        self.logger.error(f"Invalid JSON response from CDX API for {domain}: {e}")
+                        self.logger.debug(f"Raw response: {text}")
+                        return []
 
-                        # Pagination: follow Resume-Key until no more or page limit reached
-                        page = 1
-                        while "Resume-Key" in response.headers and (self.max_pages == 0 or page < self.max_pages):
-                            params["resumeKey"] = response.headers["Resume-Key"]
-                            async with self.session.get(
-                                base_url,
-                                params=params,
-                                timeout=self.request_timeout
-                            ) as paginated_response:
-                                await self._handle_errors(paginated_response)
+                    results.extend(self._process_cdx_response(data))
 
-                                try:
-                                    data = await paginated_response.json(content_type=None)
-                                    if not isinstance(data, list):
-                                        raise ValueError(f"Non-list JSON response: {data}")
-                                except Exception as e:
-                                    text = await paginated_response.text()
-                                    self.logger.error(f"Invalid JSON response during pagination for {domain}: {e}")
-                                    self.logger.debug(f"Raw response: {text}")
-                                    break
+                    # Pagination: follow Resume-Key until done or limit reached
+                    page = 1
+                    while response.headers.get("Resume-Key") and (self.max_pages == 0 or page < self.max_pages):
+                        params["resumeKey"] = response.headers.get("Resume-Key")
+                        async with self.session.get(
+                            base_url,
+                            params=params,
+                            timeout=timeout
+                        ) as paginated_response:
+                            await self._handle_errors(paginated_response)
+                            try:
+                                data = await paginated_response.json(content_type=None)
+                                if not isinstance(data, list):
+                                    raise ValueError(f"Non-list JSON response: {data}")
+                            except Exception as e:
+                                text = await paginated_response.text()
+                                self.logger.error(f"Invalid JSON response during pagination for {domain}: {e}")
+                                self.logger.debug(f"Raw response: {text}")
+                                break
 
-                                results.extend(self._process_cdx_response(data))
-                                page += 1
+                            results.extend(self._process_cdx_response(data))
+                            page += 1
 
-                        # Deduplicate and apply optional total limit
-                        unique = list(dict.fromkeys(results))  # preserve order
-                        if self.max_pages > 0:
-                            unique = unique[: self.max_pages * self.page_size]
+                    # Deduplicate and apply overall limit
+                    unique = list(dict.fromkeys(results))
+                    if self.max_pages > 0:
+                        unique = unique[: self.max_pages * self.page_size]
 
-                        self.logger.info(f"Fetched {len(unique)} snapshots for domain {domain}")
-                        return unique
+                    self.logger.info(f"Fetched {len(unique)} snapshots for domain {domain}")
+                    return unique
 
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    if attempt == self.max_retries:
-                        raise
-                    delay = self.backoff_factor ** attempt
-                    self.logger.warning(f"Retry {attempt+1} for {domain} in {delay}s")
-                    await asyncio.sleep(delay)
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                if attempt == self.max_retries:
+                    self.logger.error(f"Max retries reached for {domain}: {e}")
+                    return []
+                delay = self.backoff_factor ** attempt
+                self.logger.warning(f"Retry {attempt+1} for {domain} in {delay}s")
+                await asyncio.sleep(delay)
 
-        except Exception as e:
-            self.logger.error(f"Failed to fetch CDX for {domain}: {str(e)}")
-            self.logger.debug(f"Params: {params}")
-            return []
+        # If all retries exhausted
+        self.logger.error(f"Failed to fetch CDX for {domain} after {self.max_retries} retries")
+        return []
 
     def _process_cdx_response(self, data: list) -> List[str]:
         if not data or len(data) < 2:
@@ -199,7 +199,7 @@ class CDXManager:
             with open(self.cfg.target_domains_file, "r") as f:
                 return [line.strip() for line in f if line.strip()]
         except FileNotFoundError:
-            self.logger.error("Domains file not found")
+            self.logger.error("Domains file not found at %s", self.cfg.target_domains_file)
             return []
 
     async def _filter_new_urls(self, urls: List[str]) -> List[str]:

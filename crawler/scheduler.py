@@ -3,7 +3,7 @@ import logging
 from asyncio import PriorityQueue
 from dataclasses import dataclass, field
 from crawler.wayback_cdx import CDXManager
-from typing import List, Dict, Optional
+from typing import List, Optional
 
 @dataclass(order=True)
 class PrioritizedItem:
@@ -23,35 +23,42 @@ class Scheduler:
     ):
         # Разделение конфигураций
         self.scheduler_cfg = scheduler_cfg
-        self.cdx_cfg       = cdx_cfg
-        self.storage       = storage
-        self.fetcher       = fetcher
-        self.parser        = parser
-        self.stats         = stats
+        self.cdx_cfg = cdx_cfg
+        self.storage = storage
+        self.fetcher = fetcher
+        self.parser = parser
+        self.stats = stats
 
-        import logging
         self.logger = logging.getLogger("Scheduler")
 
-        self.queue        = PriorityQueue(maxsize=scheduler_cfg.queue_size)
-        self.workers      = []
-        self.is_running   = True
-        self.poison_pill  = scheduler_cfg.poison_pill
-        self.max_depth    = scheduler_cfg.max_depth
+        # Очередь приоритетов
+        self.queue = PriorityQueue(maxsize=scheduler_cfg.queue_size)
+        self.workers: List[asyncio.Task] = []
+        self.is_running = True
+        self.poison_pill = scheduler_cfg.poison_pill
+        self.max_depth = scheduler_cfg.max_depth
 
     async def run(self):
         """
         Запускает процесс планировщика: инициализация семян, запуск воркеров и ожидание их завершения.
         """
+        # Bootstrap начальных URL
         await self._bootstrap_seeds()
 
-        # Создание и запуск воркеров
+        # Запуск воркеров
         for _ in range(self.scheduler_cfg.max_concurrent):
-            worker = asyncio.create_task(self._worker_loop())
-            self.workers.append(worker)
+            task = asyncio.create_task(self._worker_loop())
+            self.workers.append(task)
 
-        # Ожидание завершения всех воркеров
-        await asyncio.gather(*self.workers)
-        logging.info("All workers shut down.")
+        self.logger.info("Started all workers")
+
+        try:
+            # Ожидание завершения всех воркеров
+            await asyncio.gather(*self.workers)
+        except asyncio.CancelledError:
+            self.logger.info("Workers cancelled.")
+        finally:
+            self.logger.info("All workers shut down.")
 
     async def _bootstrap_seeds(self):
         """
@@ -63,37 +70,39 @@ class Scheduler:
             self.logger.info("Bootstrapping seeds from CDX...")
             seed_urls = await cdx.get_seed_urls()
             self.logger.info(f"Total seed URLs from CDX: {len(seed_urls)}")
-            
+
             # Устанавливаем общее число URL для прогресса
             await self.stats.set_total_urls(len(seed_urls))
-            
+
+            # Добавляем URL из CDX
             for url in seed_urls:
                 await self.enqueue_url(url, priority=0, depth=0)
+
         except Exception as e:
             self.logger.error(f"Failed to bootstrap from CDX: {e}")
 
-        # Обычные семена из конфигурации
+        # Добавляем статические семена
         self.logger.info(f"Adding {len(self.scheduler_cfg.seeds)} static seed URLs")
         for url in self.scheduler_cfg.seeds:
             await self.enqueue_url(url, priority=0, depth=0)
 
     async def enqueue_url(self, url: str, priority: int = 5, depth: int = 0):
-            """
-            Добавляет URL в очередь, если глубина не превышена и URL ещё не посещён.
-            """
-            # Ограничение глубины
-            if depth > self.max_depth:
+        """
+        Добавляет URL в очередь, если глубина не превышена и URL еще не посещен.
+        """
+        if depth > self.max_depth:
+            return
+
+        self.logger.debug(f"→ Adding to queue: {url} depth={depth}")
+
+        # Защита от повторного посещения
+        async with self.storage.visited_lock:
+            if self.storage.is_visited(url):
                 return
-    
-            # Защита от повторного посещения
-            async with self.storage.visited_lock:
-                if self.storage.is_visited(url):
-                    return
-                self.storage.add_visited(url)
-    
-            # Помещаем в очередь
-            item = PrioritizedItem(priority, depth, url)
-            await self.queue.put(item)
+            self.storage.add_visited(url)
+
+        item = PrioritizedItem(priority, depth, url)
+        await self.queue.put(item)
 
     async def _worker_loop(self):
         """
@@ -113,7 +122,6 @@ class Scheduler:
 
             await self._process_url(item.url, item.depth)
             self.queue.task_done()
-
 
     async def _process_url(self, url: str, depth: int):
         """
@@ -142,53 +150,51 @@ class Scheduler:
             # Фиксируем количество совпадений
             await self.stats.increment("match_count", len(matches))
 
-            # Логируем найденные ссылки и ставим их в очередь
+            # Добавляем обнаруженные URL в очередь
             for new_url in discovered_urls:
                 self.logger.debug(f"Discovered URL: {new_url}")
                 await self.enqueue_url(new_url, priority=depth + 1, depth=depth + 1)
 
         except Exception as e:
-            # Учёт ошибок
             await self.stats.increment("error_count")
             self.logger.exception(f"Error processing {url}: {e}")
 
-
-    # crawler/scheduler.py
-    async def shutdown(self):  # <-- Добавьте этот метод
+    async def shutdown(self):
         """
         Корректное завершение работы планировщика.
         """
         if not self.is_running:
             return
-        
         self.is_running = False
-        logging.info("Shutting down scheduler...")
-        
+        self.logger.info("Shutting down scheduler...")
+
         # Отправляем poison-pill каждому воркеру
         for _ in range(self.scheduler_cfg.max_concurrent):
             await self.queue.put(PrioritizedItem(priority=100, depth=0, url=self.poison_pill))
-        
+
         # Ожидаем завершения задач
         await asyncio.gather(*self.workers, return_exceptions=True)
-        
-        # Выводим статистику
-        total_snapshots = self.storage.stats.total_snapshots
-        new_snapshots = self.storage.stats.new_snapshots
-        processed = await self.stats.get("processed_urls")
-        matches = await self.stats.get("match_count")
-        failed_domains = await self.storage.stats.get_failed_domains()
-        
-        logging.info("\n=== Final Statistics ===")
-        logging.info(f"Total snapshots found:     {total_snapshots}")
-        logging.info(f"New snapshots processed:   {new_snapshots}")
-        logging.info(f"URLs crawled:              {processed}")
-        logging.info(f"Keyword matches found:     {matches}")
-        
-        if failed_domains:
-            logging.info("\n=== Problem Domains ===")
-            for domain in failed_domains:
-                logging.info(f" - {domain}")
-        
-        # Закрываем соединения
+
+        # Закрываем соединения и сохраняем результаты
         await self.fetcher.close()
         await self.storage.persist_matches()
+
+# Точка входа
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    from config import SchedulerConfig, CDXConfig  # адаптируйте импорт
+    from fetcher import Fetcher
+    from parser import Parser
+    from storage import Storage
+    from stats import Stats
+
+    # Инициализация компонентов
+    scheduler_cfg = SchedulerConfig()
+    cdx_cfg = CDXConfig()
+    storage = Storage()
+    fetcher = Fetcher()
+    parser = Parser()
+    stats = Stats()
+
+    scheduler = Scheduler(scheduler_cfg, cdx_cfg, storage, fetcher, parser, stats)
+    asyncio.run(scheduler.run())
