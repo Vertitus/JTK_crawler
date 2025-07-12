@@ -32,7 +32,7 @@ class Scheduler:
         self.logger = logging.getLogger("Scheduler")
 
         # Очередь приоритетов
-        self.queue = PriorityQueue(maxsize=scheduler_cfg.queue_size)
+        self.queue = PriorityQueue()
         self.workers: List[asyncio.Task] = []
         self.is_running = True
         self.poison_pill = scheduler_cfg.poison_pill

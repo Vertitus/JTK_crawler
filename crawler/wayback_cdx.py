@@ -5,6 +5,7 @@ from urllib.parse import quote
 from typing import List, Optional
 from datetime import datetime
 
+
 class WaybackCDXClient:
     def __init__(
         self,
@@ -12,15 +13,15 @@ class WaybackCDXClient:
         max_retries: int = 3,
         backoff_factor: float = 2.0,
         request_timeout: int = 30,
-        max_pages: int = 100,
-        page_size: int = 5000
+        max_pages: int = 0,
+        page_size: int = 1000
     ):
         self.session = session
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.request_timeout = request_timeout
-        self.max_pages = max_pages    # 0 = no limit on pages
-        self.page_size = page_size    # number of URLs per request
+        self.max_pages = max_pages
+        self.page_size = page_size
         self.logger = logging.getLogger("CDXClient")
 
     async def fetch_snapshots(
@@ -38,8 +39,9 @@ class WaybackCDXClient:
             "to": to_date,
             "output": "json",
             "fl": "timestamp,original,statuscode,mimetype",
-            "filter": ["statuscode:200", "mimetype:text/html"],
-            "collapse": "urlkey",
+            # фильтры и collapse отключены для полного покрытия
+            # "filter": ["statuscode:200", "mimetype:text/html"],
+            # "collapse": "urlkey",
             "limit": self.page_size,
             "showResumeKey": "true",
         }
@@ -55,48 +57,56 @@ class WaybackCDXClient:
                 ) as response:
                     await self._handle_errors(response)
 
-                    # parse JSON response
+                    # Читаем Resume-Key
+                    resume_key = response.headers.get("Resume-Key")
+                    self.logger.info(f"[Page 1] resumeKey={resume_key}")
+
                     try:
                         data = await response.json(content_type=None)
                         if not isinstance(data, list):
-                            raise ValueError(f"Non-list JSON response: {data}")
+                            raise ValueError(f"Non-list JSON: {data}")
                     except Exception as e:
                         text = await response.text()
-                        self.logger.error(f"Invalid JSON response from CDX API for {domain}: {e}")
+                        self.logger.error(f"Invalid JSON from CDX API for {domain}: {e}")
                         self.logger.debug(f"Raw response: {text}")
                         return []
 
+                    page_count = 1
+                    links_count = len(data) - 1
+                    self.logger.info(f"  → page={page_count}, links={links_count}")
                     results.extend(self._process_cdx_response(data))
 
-                    # Pagination: follow Resume-Key until done or limit reached
-                    page = 1
-                    while response.headers.get("Resume-Key") and (self.max_pages == 0 or page < self.max_pages):
-                        params["resumeKey"] = response.headers.get("Resume-Key")
+                    # пагинация
+                    while resume_key and (self.max_pages == 0 or page_count < self.max_pages):
+                        params["resumeKey"] = resume_key
+                        page_count += 1
+
                         async with self.session.get(
                             base_url,
                             params=params,
                             timeout=timeout
                         ) as paginated_response:
                             await self._handle_errors(paginated_response)
+
+                            resume_key = paginated_response.headers.get("Resume-Key")
+                            self.logger.info(f"[Page {page_count}] resumeKey={resume_key}")
+
                             try:
                                 data = await paginated_response.json(content_type=None)
                                 if not isinstance(data, list):
-                                    raise ValueError(f"Non-list JSON response: {data}")
+                                    raise ValueError(f"Non-list JSON: {data}")
                             except Exception as e:
                                 text = await paginated_response.text()
-                                self.logger.error(f"Invalid JSON response during pagination for {domain}: {e}")
+                                self.logger.error(f"Invalid JSON during pagination for {domain}: {e}")
                                 self.logger.debug(f"Raw response: {text}")
                                 break
 
+                            links_count = len(data) - 1
+                            self.logger.info(f"  → page={page_count}, links={links_count}")
                             results.extend(self._process_cdx_response(data))
-                            page += 1
 
-                    # Deduplicate and apply overall limit
                     unique = list(dict.fromkeys(results))
-                    if self.max_pages > 0:
-                        unique = unique[: self.max_pages * self.page_size]
-
-                    self.logger.info(f"Fetched {len(unique)} snapshots for domain {domain}")
+                    self.logger.info(f"Total unique snapshots for {domain}: {len(unique)}")
                     return unique
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
@@ -104,10 +114,9 @@ class WaybackCDXClient:
                     self.logger.error(f"Max retries reached for {domain}: {e}")
                     return []
                 delay = self.backoff_factor ** attempt
-                self.logger.warning(f"Retry {attempt+1} for {domain} in {delay}s")
+                self.logger.warning(f"Retry {attempt+1} for {domain} in {delay}s: {e}")
                 await asyncio.sleep(delay)
 
-        # If all retries exhausted
         self.logger.error(f"Failed to fetch CDX for {domain} after {self.max_retries} retries")
         return []
 
@@ -117,14 +126,16 @@ class WaybackCDXClient:
 
         urls: List[str] = []
         for entry in data[1:]:
-            if len(entry) >= 2:
-                timestamp, original = entry[0], entry[1]
-                urls.append(self._build_wayback_url(timestamp, original))
+            if len(entry) >= 4:
+                timestamp, original, status, mime = entry[0], entry[1], entry[2], entry[3]
+                wayback_url = self._build_wayback_url(timestamp, original)
+                self.logger.debug(f"[CDX] {status} | {mime} → {wayback_url}")
+                urls.append(wayback_url)
         return urls
 
     def _build_wayback_url(self, timestamp: str, original_url: str) -> str:
         encoded = quote(original_url, safe=":/")
-        return f"http://web.archive.org/web/{timestamp}id_/{encoded}"
+        return f"http://web.archive.org/web/{timestamp}id_/{encoded}" 
 
     async def _handle_errors(self, response: aiohttp.ClientResponse):
         if response.status == 429:
@@ -139,12 +150,15 @@ class WaybackCDXClient:
             )
 
         if response.status != 200:
+            text = await response.text()
+            self.logger.error(f"HTTP error {response.status}: {text[:200]}")
             raise aiohttp.ClientResponseError(
                 request_info=response.request_info,
                 history=response.history,
                 status=response.status,
                 message=f"HTTP error {response.status}"
             )
+
 
 class CDXManager:
     def __init__(self, cfg, storage):
