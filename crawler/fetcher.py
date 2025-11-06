@@ -1,25 +1,48 @@
+# fetcher.py (замена/обновление)
 import aiohttp
 import asyncio
 import logging
-from aiohttp import ClientSession, ClientError
-from typing import List, Tuple
+from aiohttp import ClientSession, ClientError, InvalidURL, ClientConnectorError
+from typing import List, Tuple, Optional
 from .utils import rotate_user_agent
 import chardet  # для определения кодировки
+from urllib.parse import urlparse
+from typing import Tuple, Optional
 
 logger = logging.getLogger("Fetcher")
 
+def normalize_url(raw: str) -> Optional[str]:
+    """Пытаемся привести к валидному URL.
+       Возвращаем None если URL некорректен / явно шаблонный.
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    # пропускаем явные шаблоны
+    if "*" in raw:
+        return None
+    parsed = urlparse(raw)
+    # если уже есть схема — принимаем
+    if parsed.scheme in ("http", "https"):
+        return raw
+    # если это web.archive.org — добавим схему если не задана
+    if raw.startswith("web.archive.org") or raw.startswith("http://web.archive.org") or raw.startswith("https://web.archive.org"):
+        if not parsed.scheme:
+            return "https://" + raw
+        return raw
+    # если просто домен или путь без схемы — добавим http://
+    if "." in raw and parsed.scheme == "":
+        return "http://" + raw
+    return None
+
 class Fetcher:
     def __init__(self, cfg):
-        """
-        cfg — это инстанс FetchConfig, в котором есть:
-          - user_agents_file: str
-          - rate_limit: float
-        """
         self.cfg = cfg
         self.user_agents = self._load_user_agents(cfg.user_agents_file)
-        self.rate_limit = cfg.rate_limit
-        self.session: ClientSession | None = None
+        self.rate_limit = getattr(cfg, "rate_limit", 0)
+        self.session: Optional[ClientSession] = None
         self.logger = logger
+        self._timeout_seconds = getattr(cfg, "request_timeout", 30)
 
     def _load_user_agents(self, user_agents_file: str) -> List[str]:
         try:
@@ -30,27 +53,31 @@ class Fetcher:
             return []
 
     async def _ensure_session(self):
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
+            # использовать trust_env=True если нужен системный прокси/Tor через env
+            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+            self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=True)
 
-    async def fetch(self, url: str) -> Tuple[str | None, str]:
-        """
-        Выполняет GET-запрос по URL.
-        Возвращает кортеж (content, final_url).
-        Если запрос не удался — content будет None.
-        """
+    async def fetch(self, url: str) -> Tuple[Optional[str], str, Optional[int]]:
+
+        """Returns (content_or_None, final_url_or_input)."""
         self.logger.debug(f"Fetching URL: {url}")
         await self._ensure_session()
 
+        normalized = normalize_url(url)
+        if not normalized:
+            self.logger.warning("URL not normalized / skipped: %s", url)
+            return None, url
+
         try:
-            headers = {'User-Agent': rotate_user_agent(self.user_agents)}
-            async with self.session.get(url, headers=headers) as response:
+            headers = {'User-Agent': rotate_user_agent(self.user_agents) or "JTK-Crawler/1.0"}
+            async with self.session.get(normalized, headers=headers) as response:
                 if response.status != 200:
-                    self.logger.warning(f"Request to {url} failed with status {response.status}")
+                    self.logger.warning(f"Request to {normalized} failed with status {response.status}")
                     return None, str(response.url)
 
                 raw = await response.read()
-                # Определяем кодировку
                 detected = chardet.detect(raw)
                 encoding = detected.get('encoding') or response.charset or 'latin-1'
                 try:
@@ -60,19 +87,32 @@ class Fetcher:
 
                 final_url = str(response.url)
                 self.logger.debug(f"Decoded content length: {len(content)} chars from {final_url}")
+                status = response.status
 
-                if self.rate_limit > 0:
+                if self.rate_limit and self.rate_limit > 0:
                     await asyncio.sleep(self.rate_limit)
 
-                return content, final_url
+                return content, final_url, status
 
-        except ClientError as e:
-            self.logger.error(f"Network error while fetching {url}: {e}")
+        except InvalidURL as e:
+            self.logger.exception("InvalidURL fetching %s: %s", normalized, e)
             return None, url
+        except (ClientConnectorError, asyncio.TimeoutError) as e:
+            self.logger.exception("Connection/Timeout error fetching %s: %s", normalized, e)
+            return None, normalized
+        except ClientError as e:
+            self.logger.exception("ClientError fetching %s: %s", normalized, e)
+            return None, normalized
+        except Exception as e:
+            # на всякий случай — логируем полную трассировку
+            self.logger.exception("Unexpected error while fetching %s: %s", normalized, e)
+            return None, normalized
 
     async def close(self):
-        """
-        Закрывает сессию при завершении работы.
-        """
         if self.session:
-            await self.session.close()
+            try:
+                await self.session.close()
+            except Exception:
+                self.logger.exception("Error closing session")
+            finally:
+                self.session = None

@@ -33,6 +33,9 @@ async def main():
         await fetcher._ensure_session()
         print(f"Fetcher session: {fetcher.session}")
         
+        if not fetcher.session:
+            raise RuntimeError("Fetcher session not initialized")
+
         parser = Parser(cfg.parser)
         
         print("[5/5] Starting scheduler...")

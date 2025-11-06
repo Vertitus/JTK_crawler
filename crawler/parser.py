@@ -6,7 +6,6 @@ import re
 import logging
 from typing import List, Tuple, Dict, Any
 from urllib.parse import urljoin
-import requests
 from bs4 import BeautifulSoup, Comment
 
 class Parser:
@@ -49,12 +48,7 @@ class Parser:
             self.logger.error(f"Error saving metrics for {url}: {e}")
 
     def get_status(self, url):
-        """Возвращает HTTP статус код для указанного URL."""
-        try:
-            response = requests.get(url)
-            return response.status_code  # Вернёт HTTP статус код (например, 200)
-        except requests.RequestException:
-            return "Ошибка"
+        return None
 
     def _compile_patterns(self, patterns_file: str) -> List[re.Pattern]:
         """Загружает и компилирует регулярные выражения для поиска ключевых слов."""
@@ -71,7 +65,7 @@ class Parser:
             self.logger.error(f"Failed to load patterns: {e}")
         return patterns
 
-    def parse(self, html: str, base_url: str, depth: int) -> Tuple[List[Dict[str, Any]], List[str]]:
+    def parse(self, html: str, base_url: str, depth: int = 0, http_status: int | None = None) -> Tuple[List[Dict[str, Any]], List[str]]:
         """
         Парсит HTML:
           - возвращает список найденных совпадений (ключевых слов и ссылок)

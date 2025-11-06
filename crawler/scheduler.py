@@ -4,6 +4,7 @@ from asyncio import PriorityQueue
 from dataclasses import dataclass, field
 from crawler.wayback_cdx import CDXManager
 from typing import List, Optional
+from crawler.fetcher import normalize_url
 
 @dataclass(order=True)
 class PrioritizedItem:
@@ -71,8 +72,9 @@ class Scheduler:
             seed_urls = await cdx.get_seed_urls()
             self.logger.info(f"Total seed URLs from CDX: {len(seed_urls)}")
 
-            # Устанавливаем общее число URL для прогресса
-            await self.stats.set_total_urls(len(seed_urls))
+            # Устанавливаем общее число URL для прогресса (CDX + static seeds)
+            total_seeds = len(seed_urls) + len(self.scheduler_cfg.seeds)
+            await self.stats.set_total_urls(total_seeds)
 
             # Добавляем URL из CDX
             for url in seed_urls:
@@ -81,27 +83,28 @@ class Scheduler:
         except Exception as e:
             self.logger.error(f"Failed to bootstrap from CDX: {e}")
 
-        # Добавляем статические семена
+        # Добавляем статические семена (после CDX)
         self.logger.info(f"Adding {len(self.scheduler_cfg.seeds)} static seed URLs")
         for url in self.scheduler_cfg.seeds:
             await self.enqueue_url(url, priority=0, depth=0)
 
     async def enqueue_url(self, url: str, priority: int = 5, depth: int = 0):
-        """
-        Добавляет URL в очередь, если глубина не превышена и URL еще не посещен.
-        """
         if depth > self.max_depth:
             return
 
-        self.logger.debug(f"→ Adding to queue: {url} depth={depth}")
+        norm = normalize_url(url)
+        if not norm:
+            self.logger.debug(f"Skipping invalid/unnormalizable URL: {url}")
+            return
 
-        # Защита от повторного посещения
+        self.logger.debug(f"→ Adding to queue: {norm} depth={depth}")
+
         async with self.storage.visited_lock:
-            if self.storage.is_visited(url):
+            if self.storage.is_visited(norm):
                 return
-            self.storage.add_visited(url)
+            self.storage.add_visited(norm)
 
-        item = PrioritizedItem(priority, depth, url)
+        item = PrioritizedItem(priority, depth, norm)
         await self.queue.put(item)
 
     async def _worker_loop(self):
@@ -128,14 +131,14 @@ class Scheduler:
         Обрабатывает один URL: скачивает контент, парсит, сохраняет результаты и добавляет новые URL.
         """
         try:
-            content, final_url = await self.fetcher.fetch(url)
+            content, final_url, status = await self.fetcher.fetch(url)
             if not content:
                 self.logger.warning(f"No content for {url}, skipping.")
                 return
 
             self.logger.info(f"Fetched {len(content)} bytes from {final_url}")
 
-            matches, discovered_urls = self.parser.parse(content, final_url)
+            matches, discovered_urls = self.parser.parse(content, final_url, depth, http_status=status)
             if matches:
                 await self.storage.save_matches(final_url, matches)
                 self.logger.info(f"  → {len(matches)} keyword matches at {final_url}")
