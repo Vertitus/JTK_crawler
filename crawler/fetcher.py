@@ -8,6 +8,7 @@ from .utils import rotate_user_agent
 import chardet  # для определения кодировки
 from urllib.parse import urlparse
 from typing import Tuple, Optional
+from aiohttp_socks import ProxyConnector
 
 logger = logging.getLogger("Fetcher")
 
@@ -43,6 +44,7 @@ class Fetcher:
         self.session: Optional[ClientSession] = None
         self.logger = logger
         self._timeout_seconds = getattr(cfg, "request_timeout", 30)
+        self.network_cfg = getattr(cfg, "network", None)
 
     def _load_user_agents(self, user_agents_file: str) -> List[str]:
         try:
@@ -55,9 +57,19 @@ class Fetcher:
     async def _ensure_session(self):
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
-            # использовать trust_env=True если нужен системный прокси/Tor через env
-            connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
-            self.session = aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=True)
+            if self.network_cfg and self.network_cfg.use_tor:
+                connector = ProxyConnector.from_url(self.network_cfg.tor_socks_url)
+                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                self.logger.info(f"Fetcher: using Tor SOCKS proxy {self.network_cfg.tor_socks_url}")
+            elif self.network_cfg and self.network_cfg.proxy_url:
+                # HTTP proxy = per-request proxy field (you can still create TCPConnector)
+                connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                self.logger.info(f"Fetcher: using HTTP proxy {self.network_cfg.proxy_url}")
+            else:
+                connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
+                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                self.logger.info("Fetcher: using direct connection")
 
     async def fetch(self, url: str) -> Tuple[Optional[str], str, Optional[int]]:
 

@@ -6,6 +6,12 @@ from typing import List, Tuple
 from pathlib import Path
 
 @dataclass
+class NetworkConfig:
+    use_tor: bool = False
+    tor_socks_url: str = "socks5://127.0.0.1:9050"
+    proxy_url: str = ""  # optional HTTP proxy e.g. "http://user:pass@host:port"
+
+@dataclass
 class CDXConfig:
     request_timeout: int
     max_pages: int
@@ -40,14 +46,13 @@ class ParserConfig:
 
 @dataclass
 class SchedulerConfig:
-    
     seeds: List[str]
     poison_pill: str
     max_concurrent: int
     max_depth: int
     queue_size: int
-    cdx: CDXConfig 
-
+    cdx: CDXConfig
+    concurrency: int = 10
     debug: bool = False
 
 
@@ -66,6 +71,8 @@ class Config:
     parser: ParserConfig
     scheduler: SchedulerConfig
     cdx: CDXConfig
+    network: NetworkConfig
+
 
 def validate_positive(value, name):
     if value <= 0:
@@ -96,6 +103,7 @@ def load_config(path: str = 'config.yaml') -> Config:
         queue_size=raw['queue_size'],
         auto_save_interval=raw['auto_save_interval'],
         batch_size=raw['batch_size'],
+        network=NetworkConfig(**raw.get('network', {})),
         cache_dir=raw['cache_dir'],
         log=LogConfig(**raw['log']),
         fetch=FetchConfig(**raw['fetch']),

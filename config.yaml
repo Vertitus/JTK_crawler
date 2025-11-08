@@ -44,3 +44,7 @@ cdx:
   backoff_factor: 2.0      # Экспоненциальная задержка при повторах
   target_domains_file: "domains.txt"  # Путь к файлу с доменами
   max_retries: 3 
+network:
+  use_tor: true
+  tor_socks_url: "socks5://127.0.0.1:9050"
+  proxy_url: ""

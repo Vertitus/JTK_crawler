@@ -29,7 +29,7 @@ class Scheduler:
         self.fetcher = fetcher
         self.parser = parser
         self.stats = stats
-
+        self.semaphore = asyncio.Semaphore(self.config.concurrency)
         self.logger = logging.getLogger("Scheduler")
 
         # Очередь приоритетов
@@ -123,44 +123,47 @@ class Scheduler:
                 self.logger.info(f"[{worker_name}] Received poison pill, stopping.")
                 break
 
-            await self._process_url(item.url, item.depth)
+            async with self.semaphore:
+                await self._process_url(item.url, item.depth)
             self.queue.task_done()
 
     async def _process_url(self, url: str, depth: int):
-        """
-        Обрабатывает один URL: скачивает контент, парсит, сохраняет результаты и добавляет новые URL.
-        """
-        try:
-            content, final_url, status = await self.fetcher.fetch(url)
-            if not content:
-                self.logger.warning(f"No content for {url}, skipping.")
-                return
 
-            self.logger.info(f"Fetched {len(content)} bytes from {final_url}")
+        async with self.semaphore:
+            """
+            Обрабатывает один URL: скачивает контент, парсит, сохраняет результаты и добавляет новые URL.
+            """
+            try:
+                content, final_url, status = await self.fetcher.fetch(url)
+                if not content:
+                    self.logger.warning(f"No content for {url}, skipping.")
+                    return
 
-            matches, discovered_urls = self.parser.parse(content, final_url, depth, http_status=status)
-            if matches:
-                await self.storage.save_matches(final_url, matches)
-                self.logger.info(f"  → {len(matches)} keyword matches at {final_url}")
+                self.logger.info(f"Fetched {len(content)} bytes from {final_url}")
 
-            # Обновляем статистику
-            await self.stats.increment("processed_urls")
-            processed = await self.stats.get("processed_urls")
-            total = await self.stats.get_total_urls()
-            pct = (processed / total * 100) if total else 0
-            self.logger.info(f"Progress: {processed}/{total} URLs ({pct:.2f}%)")
+                matches, discovered_urls = self.parser.parse(content, final_url, depth, http_status=status)
+                if matches:
+                    await self.storage.save_matches(final_url, matches)
+                    self.logger.info(f"  → {len(matches)} keyword matches at {final_url}")
 
-            # Фиксируем количество совпадений
-            await self.stats.increment("match_count", len(matches))
+                # Обновляем статистику
+                await self.stats.increment("processed_urls")
+                processed = await self.stats.get("processed_urls")
+                total = await self.stats.get_total_urls()
+                pct = (processed / total * 100) if total else 0
+                self.logger.info(f"Progress: {processed}/{total} URLs ({pct:.2f}%)")
 
-            # Добавляем обнаруженные URL в очередь
-            for new_url in discovered_urls:
-                self.logger.debug(f"Discovered URL: {new_url}")
-                await self.enqueue_url(new_url, priority=depth + 1, depth=depth + 1)
+                # Фиксируем количество совпадений
+                await self.stats.increment("match_count", len(matches))
 
-        except Exception as e:
-            await self.stats.increment("error_count")
-            self.logger.exception(f"Error processing {url}: {e}")
+                # Добавляем обнаруженные URL в очередь
+                for new_url in discovered_urls:
+                    self.logger.debug(f"Discovered URL: {new_url}")
+                    await self.enqueue_url(new_url, priority=depth + 1, depth=depth + 1)
+
+            except Exception as e:
+                await self.stats.increment("error_count")
+                self.logger.exception(f"Error processing {url}: {e}")
 
     async def shutdown(self):
         """

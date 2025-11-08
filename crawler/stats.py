@@ -3,6 +3,7 @@ import asyncio
 from collections import defaultdict
 from typing import Dict, List, Set
 import logging
+import time
 
 class Stats:
     def __init__(self):
@@ -12,6 +13,35 @@ class Stats:
         self.new_snapshots: int = 0
         self.failed_domains: Set[str] = set()
         self.total_urls: int = 0  # общее число URL для обработки
+        self.time_series_processed = []  # list of (ts, processed_count)
+        self.time_series_matches = []
+        self.time_series_errors = []
+
+    async def snapshot_time_series(self):
+        async with self._lock:
+            ts = int(time.time())
+            processed = self._counters.get("processed_urls", 0)
+            matches = self._counters.get("match_count", 0)
+            errors = self._counters.get("error_count", 0)
+            self.time_series_processed.append((ts, processed))
+            self.time_series_matches.append((ts, matches))
+            self.time_series_errors.append((ts, errors))
+
+    async def export_csv(self, path="stats_timeseries.csv"):
+        import csv
+        async with self._lock:
+            rows = []
+            # assume same lengths and aligned by index
+            length = max(len(self.time_series_processed), len(self.time_series_matches), len(self.time_series_errors))
+            for i in range(length):
+                p = self.time_series_processed[i] if i < len(self.time_series_processed) else (None, None)
+                m = self.time_series_matches[i] if i < len(self.time_series_matches) else (None, None)
+                e = self.time_series_errors[i] if i < len(self.time_series_errors) else (None, None)
+                rows.append([p[0], p[1], m[1], e[1]])
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["ts", "processed", "matches", "errors"])
+                writer.writerows(rows)
 
     async def get_progress(self) -> float:
         """
