@@ -7,6 +7,8 @@ import logging
 from typing import List, Tuple, Dict, Any
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, Comment
+import json, os
+
 
 
 class Parser:
