@@ -4,12 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 from typing import List, Tuple
 from pathlib import Path
+from typing import Optional
 
 @dataclass
 class NetworkConfig:
     use_tor: bool = False
-    tor_socks_url: str = "socks5://127.0.0.1:9050"
-    proxy_url: str = ""  # optional HTTP proxy e.g. "http://user:pass@host:port"
+    tor_socks_url: Optional[str] = "socks5://127.0.0.1:9050"
+    proxy_url: Optional[str] = None
 
 @dataclass
 class CDXConfig:
@@ -30,7 +31,8 @@ class LogConfig:
 class FetchConfig:
     user_agents_file: str
     rate_limit: float
-
+    request_timeout: int = 30  # ← добавь эту строку
+    network: Optional['NetworkConfig'] = None
 @dataclass
 class StorageConfig:
     bloom_capacity: int

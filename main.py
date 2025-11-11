@@ -8,12 +8,15 @@ from crawler.fetcher import Fetcher
 from crawler.parser import Parser
 from crawler.storage import Storage
 from crawler.stats import Stats
+from crawler.rate_limiter import RateLimiter
 
 async def log_progress(stats: Stats):
     while True:
         progress = await stats.get_progress()
         logging.info(f"[Progress] {progress:.2f}%")
         await asyncio.sleep(10)
+
+
 
 async def main():
     try:
@@ -27,6 +30,9 @@ async def main():
         print("[3/5] Creating core components...")
         stats = Stats()
         storage = Storage(cfg.storage, stats)
+        rate_limiter = RateLimiter(min_interval=1.5)
+        
+        cfg.fetch.network = cfg.network  
         fetcher = Fetcher(cfg.fetch)
         
         print("[4/5] Initializing fetcher session...")
@@ -39,8 +45,19 @@ async def main():
         parser = Parser(cfg.parser)
         
         print("[5/5] Starting scheduler...")
+
+        print("Testing Tor connection...")
+        test_url = "https://check.torproject.org/"
+        content, final_url, status = await fetcher.fetch(test_url)
+        if content and "Congratulations. This browser is configured to use Tor" in content:
+            print("✅ Tor connection verified!")
+        else:
+            print("⚠️ Tor not detected! Check if Tor is running and socks URL is correct.")
+            return
+
         scheduler = Scheduler(cfg.scheduler, cfg.cdx, storage, fetcher, parser, stats)
         setup_signal_handlers(scheduler.shutdown)
+        
         
         # Запуск задачи прогресса
         progress_task = asyncio.create_task(log_progress(stats))

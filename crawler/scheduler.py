@@ -29,7 +29,7 @@ class Scheduler:
         self.fetcher = fetcher
         self.parser = parser
         self.stats = stats
-        self.semaphore = asyncio.Semaphore(self.config.concurrency)
+        self.semaphore = asyncio.Semaphore(self.scheduler_cfg.max_concurrent)
         self.logger = logging.getLogger("Scheduler")
 
         # Очередь приоритетов
@@ -63,7 +63,8 @@ class Scheduler:
 
     async def _bootstrap_seeds(self):
         """
-        Загружает начальные URL: сначала из Wayback Machine, затем из конфигурации.
+        Загружает начальные URL только из Wayback Machine.
+        Если CDX ничего не нашёл, можно опционально обернуть сиды в архивные ссылки.
         """
         try:
             cdx = CDXManager(self.cdx_cfg, self.storage)
@@ -72,21 +73,33 @@ class Scheduler:
             seed_urls = await cdx.get_seed_urls()
             self.logger.info(f"Total seed URLs from CDX: {len(seed_urls)}")
 
-            # Устанавливаем общее число URL для прогресса (CDX + static seeds)
-            total_seeds = len(seed_urls) + len(self.scheduler_cfg.seeds)
+            # === Если CDX ничего не нашёл ===
+            if len(seed_urls) == 0:
+                self.logger.warning("⚠️ CDX returned 0 snapshots — skipping live seeds to avoid non-archived URLs.")
+
+                # --- вариант 1: полностью пропустить ---
+                # return
+
+                # --- вариант 2 (предпочтительно): обернуть обычные URL в архивные Wayback-ссылки ---
+                wrapped = [
+                    f"https://web.archive.org/web/20050101000000id_/{url}"
+                    for url in self.scheduler_cfg.seeds
+                ]
+                self.logger.info(f"Using {len(wrapped)} fallback Wayback seeds")
+                await self.stats.set_total_urls(len(wrapped))
+                for url in wrapped:
+                    await self.enqueue_url(url, priority=0, depth=0)
+                return
+
+            # === Если CDX нашёл что-то ===
+            total_seeds = len(seed_urls)
             await self.stats.set_total_urls(total_seeds)
 
-            # Добавляем URL из CDX
             for url in seed_urls:
                 await self.enqueue_url(url, priority=0, depth=0)
 
         except Exception as e:
             self.logger.error(f"Failed to bootstrap from CDX: {e}")
-
-        # Добавляем статические семена (после CDX)
-        self.logger.info(f"Adding {len(self.scheduler_cfg.seeds)} static seed URLs")
-        for url in self.scheduler_cfg.seeds:
-            await self.enqueue_url(url, priority=0, depth=0)
 
     async def enqueue_url(self, url: str, priority: int = 5, depth: int = 0):
         if depth > self.max_depth:

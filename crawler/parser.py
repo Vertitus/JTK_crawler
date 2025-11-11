@@ -5,8 +5,9 @@ import time
 import re
 import logging
 from typing import List, Tuple, Dict, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, Comment
+
 
 class Parser:
     def __init__(self, cfg):
@@ -130,8 +131,47 @@ class Parser:
 
         discovered_urls = list(dict.fromkeys(discovered_urls))
 
+        converted_urls = []
+        for u in discovered_urls:
+            new_u = Parser._to_wayback_url(base_url, u)
+            if new_u:
+                converted_urls.append(new_u)
+        discovered_urls = list(dict.fromkeys(converted_urls))
+
         # Сохраняем метрики
         status = self.get_status(base_url)
         self._save_metrics(base_url, unique_matches, depth, status)
 
         return unique_matches, discovered_urls
+    
+    def _to_wayback_url(base_url: str, found_url: str) -> str:
+        """
+        Преобразует ссылку, найденную внутри страницы Wayback, 
+        обратно в архивную (с тем же timestamp).
+        """
+        if not found_url:
+            return None
+
+        # Если ссылка уже архивная — не трогаем
+        if "web.archive.org/web/" in found_url:
+            return found_url
+
+        # Определяем timestamp из base_url
+        parsed = urlparse(base_url)
+        if "web.archive.org" not in parsed.netloc:
+            # Страница не архивная → оставляем как есть
+            return found_url
+
+        # Извлекаем timestamp
+        try:
+            parts = parsed.path.split("/")
+            idx = parts.index("web") + 1
+            timestamp = parts[idx]
+        except Exception:
+            return found_url
+
+        # Восстанавливаем относительные ссылки
+        joined = urljoin(base_url, found_url)
+
+        # Оборачиваем в архивный URL
+        return f"https://web.archive.org/web/{timestamp}id_/{joined}"

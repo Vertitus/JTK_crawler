@@ -11,7 +11,8 @@ log:
   backup_count: 5
 fetch:
   user_agents_file: "user_agents.txt"
-  rate_limit: 1
+  request_timeout: 60
+  rate_limit: 0.5
 storage:
   bloom_capacity: 1000000
   bloom_error_rate: 0.001
@@ -47,4 +48,3 @@ cdx:
 network:
   use_tor: true
   tor_socks_url: "socks5://127.0.0.1:9050"
-  proxy_url: ""

@@ -61,15 +61,10 @@ class Fetcher:
                 connector = ProxyConnector.from_url(self.network_cfg.tor_socks_url)
                 self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
                 self.logger.info(f"Fetcher: using Tor SOCKS proxy {self.network_cfg.tor_socks_url}")
-            elif self.network_cfg and self.network_cfg.proxy_url:
-                # HTTP proxy = per-request proxy field (you can still create TCPConnector)
-                connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
-                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-                self.logger.info(f"Fetcher: using HTTP proxy {self.network_cfg.proxy_url}")
             else:
-                connector = aiohttp.TCPConnector(limit=20, ttl_dns_cache=300)
-                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-                self.logger.info("Fetcher: using direct connection")
+                raise RuntimeError("Tor must be enabled — direct connection is blocked for this environment.")
+
+
 
     async def fetch(self, url: str) -> Tuple[Optional[str], str, Optional[int]]:
 
