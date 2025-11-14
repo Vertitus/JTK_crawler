@@ -8,11 +8,12 @@ from typing import List, Tuple, Dict, Any
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup, Comment
 import json, os
+import asyncio
 
 
 
 class Parser:
-    def __init__(self, cfg):
+    def __init__(self, cfg, storage=None):
         """
         Инициализация парсера.
         cfg — это инстанс ParserConfig с полем:
@@ -21,6 +22,7 @@ class Parser:
         self.logger = logging.getLogger(__name__)
         self.metrics_file = "metrics.json"  # Путь к файлу с метриками
         self.keyword_patterns = self._compile_patterns(cfg.patterns_file)
+        self.storage = storage
 
         # Проверка и создание файла с метриками, если его нет
         if not os.path.exists(self.metrics_file):
@@ -76,6 +78,8 @@ class Parser:
         """
         matches: List[Dict[str, Any]] = []
         discovered_urls: List[str] = []
+
+        self.logger.debug(f"[Parser] Parsing started for {base_url}")
 
         try:
             soup = BeautifulSoup(html, 'html.parser')
@@ -143,6 +147,13 @@ class Parser:
         # Сохраняем метрики
         status = self.get_status(base_url)
         self._save_metrics(base_url, unique_matches, depth, status)
+
+        if self.storage:
+            try:
+                # создаём асинхронную задачу, чтобы не тормозить парсер
+                asyncio.create_task(self.storage.save_matches(base_url, unique_matches))
+            except Exception as e:
+                self.logger.error(f"Error sending matches to storage: {e}")
 
         return unique_matches, discovered_urls
     

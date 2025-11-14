@@ -1,8 +1,8 @@
 max_concurrent: 8
 max_retries: 3
-max_depth: 3
+max_depth: 1
 queue_size: 10000
-auto_save_interval: 300
+auto_save_interval: 10
 batch_size: 1000
 cache_dir: 'cache'
 log:
@@ -36,12 +36,12 @@ scheduler:
     - "pya.cc"
   poison_pill: "STOP"
   max_concurrent: 8
-  max_depth: 3
+  max_depth: 0
   queue_size: 10000
 cdx:
   request_timeout: 30       # Таймаут запросов к CDX API (сек)
   max_pages: 0   
-  page_size: 5000          # Макс. страниц результатов (5000 URL на страницу)
+  page_size: 100          # Макс. страниц результатов (5000 URL на страницу)
   backoff_factor: 2.0      # Экспоненциальная задержка при повторах
   target_domains_file: "domains.txt"  # Путь к файлу с доменами
   max_retries: 3 

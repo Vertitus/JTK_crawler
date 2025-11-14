@@ -42,7 +42,7 @@ async def main():
         if not fetcher.session:
             raise RuntimeError("Fetcher session not initialized")
 
-        parser = Parser(cfg.parser)
+        parser = Parser(cfg.parser, storage=storage)
         
         print("[5/5] Starting scheduler...")
 
@@ -71,6 +71,7 @@ async def main():
             await progress_task
         except asyncio.CancelledError:
             pass
+        await storage.shutdown()
         print("=== Crawler finished ===")
 
     except Exception as e:

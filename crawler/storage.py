@@ -50,6 +50,9 @@ class Storage:
         if not matches:
             return
 
+        if self.logger:
+            self.logger.debug(f"[Storage] Received {len(matches)} matches from {url}")
+
         self._matches[url] = matches
         now = time.time()
 
@@ -60,6 +63,10 @@ class Storage:
 
     async def persist_matches(self):
         """Сбрасывает все накопленные совпадения в result.json (в читаемом виде)."""
+
+        print(f"[Storage] Persist called — {len(self._matches)} urls in memory")
+
+
         try:
             if not self._matches:
                 return

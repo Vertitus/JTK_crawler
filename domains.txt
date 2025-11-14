@@ -8,3 +8,5 @@ ocn.ne.jp
 biglobe.ne.jp
 pya.cc
 fileman.n1e.jp/TOP.PHP
+ameblo.jp
+livedoor.jp

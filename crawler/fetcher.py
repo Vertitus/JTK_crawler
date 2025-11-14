@@ -67,22 +67,22 @@ class Fetcher:
 
 
     async def fetch(self, url: str) -> Tuple[Optional[str], str, Optional[int]]:
+        """Fetch page safely. Returns (content_or_None, final_url_or_input, status_or_None)."""
 
-        """Returns (content_or_None, final_url_or_input)."""
         self.logger.debug(f"Fetching URL: {url}")
         await self._ensure_session()
 
         normalized = normalize_url(url)
         if not normalized:
             self.logger.warning("URL not normalized / skipped: %s", url)
-            return None, url
+            return None, url, None                     # ✅ всегда три значения
 
         try:
             headers = {'User-Agent': rotate_user_agent(self.user_agents) or "JTK-Crawler/1.0"}
-            async with self.session.get(normalized, headers=headers) as response:
+            async with self.session.get(normalized, headers=headers, timeout=30) as response:  # ✅ добавлен таймаут
                 if response.status != 200:
                     self.logger.warning(f"Request to {normalized} failed with status {response.status}")
-                    return None, str(response.url)
+                    return None, str(response.url), response.status                            # ✅ три значения
 
                 raw = await response.read()
                 detected = chardet.detect(raw)
@@ -93,27 +93,34 @@ class Fetcher:
                     content = raw.decode(encoding, errors='replace')
 
                 final_url = str(response.url)
-                self.logger.debug(f"Decoded content length: {len(content)} chars from {final_url}")
                 status = response.status
+                self.logger.debug(f"Decoded content length: {len(content)} chars from {final_url}")
 
                 if self.rate_limit and self.rate_limit > 0:
                     await asyncio.sleep(self.rate_limit)
 
                 return content, final_url, status
 
-        except InvalidURL as e:
-            self.logger.exception("InvalidURL fetching %s: %s", normalized, e)
-            return None, url
-        except (ClientConnectorError, asyncio.TimeoutError) as e:
-            self.logger.exception("Connection/Timeout error fetching %s: %s", normalized, e)
-            return None, normalized
-        except ClientError as e:
-            self.logger.exception("ClientError fetching %s: %s", normalized, e)
-            return None, normalized
+        # ---------- [⚙️ Обработка ошибок без трассировок] ----------
+        except InvalidURL:
+            self.logger.warning(f"❌ Invalid URL skipped: {url}")
+            return None, url, None
+
+        except (ClientConnectorError, asyncio.TimeoutError):
+            self.logger.warning(f"⏳ Timeout / Connection error fetching {url}")
+            return None, url, None
+
+        except ClientError:
+            self.logger.warning(f"⚠️ ClientError fetching {url}")
+            return None, url, None
+
         except Exception as e:
-            # на всякий случай — логируем полную трассировку
-            self.logger.exception("Unexpected error while fetching %s: %s", normalized, e)
-            return None, normalized
+            # Только при DEBUG включаем трассировку
+            if self.logger.isEnabledFor(logging.DEBUG):
+                self.logger.exception(f"Unexpected error while fetching {url}: {e}")
+            else:
+                self.logger.error(f"❌ Fetcher failed for {url}: {type(e).__name__}")
+            return None, url, None
 
     async def close(self):
         if self.session:

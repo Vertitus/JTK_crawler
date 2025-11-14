@@ -56,8 +56,8 @@ class WaybackCDXClient:
     async def fetch_snapshots(
         self,
         domain: str,
-        from_date: str = "20050101000000",
-        to_date: str = "20051231235959",
+        from_date: str = "20050701000000",
+        to_date: str = "20050831235959",
     ) ->     List[str]:
         """
         Попытка 1: запрос с параметрами fl/matchType (более точный).

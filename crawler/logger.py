@@ -52,3 +52,4 @@ def init_logger(cfg):
     root.addHandler(console_handler)
 
     root.info("Logger initialized")
+    logging.getLogger("crawler.parser").setLevel(logging.INFO)
