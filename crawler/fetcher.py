@@ -1,87 +1,125 @@
-# crawler/fetcher.py
-
+# fetcher.py (замена/обновление)
 import aiohttp
-import random
 import asyncio
 import logging
-from aiohttp import ClientSession, ClientError
-from typing import List, Tuple
-from .utils import rotate_user_agent  # если у вас есть такая утилита
+from aiohttp import ClientSession, ClientError, InvalidURL, ClientConnectorError
+from typing import List, Tuple, Optional
+from .utils import rotate_user_agent
+import chardet  # для определения кодировки
+from urllib.parse import urlparse
+from typing import Tuple, Optional
+from aiohttp_socks import ProxyConnector
+
+logger = logging.getLogger("Fetcher")
+
+def normalize_url(raw: str) -> Optional[str]:
+    """Пытаемся привести к валидному URL.
+       Возвращаем None если URL некорректен / явно шаблонный.
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    # пропускаем явные шаблоны
+    if "*" in raw:
+        return None
+    parsed = urlparse(raw)
+    # если уже есть схема — принимаем
+    if parsed.scheme in ("http", "https"):
+        return raw
+    # если это web.archive.org — добавим схему если не задана
+    if raw.startswith("web.archive.org") or raw.startswith("http://web.archive.org") or raw.startswith("https://web.archive.org"):
+        if not parsed.scheme:
+            return "https://" + raw
+        return raw
+    # если просто домен или путь без схемы — добавим http://
+    if "." in raw and parsed.scheme == "":
+        return "http://" + raw
+    return None
 
 class Fetcher:
     def __init__(self, cfg):
-        """
-        cfg — это инстанс FetchConfig, в котором есть:
-          - user_agents_file: str
-          - rate_limit: float
-          # При необходимости можно добавить другие поля в FetchConfig 
-          # и обращаться к ним через cfg.<field>
-        """
         self.cfg = cfg
         self.user_agents = self._load_user_agents(cfg.user_agents_file)
-        self.rate_limit = cfg.rate_limit
-        # если вы хотите ограничивать максимальное число одновременных запросов
-        # можно передать max_concurrent из основного конфига через аргумент
-        # self.semaphore = asyncio.Semaphore(cfg.max_concurrent)
-        self.session: ClientSession | None = None
+        self.rate_limit = getattr(cfg, "rate_limit", 0)
+        self.session: Optional[ClientSession] = None
+        self.logger = logger
+        self._timeout_seconds = getattr(cfg, "request_timeout", 30)
+        self.network_cfg = getattr(cfg, "network", None)
 
     def _load_user_agents(self, user_agents_file: str) -> List[str]:
-        """
-        Загружает список User-Agent из файла, по одному на строку.
-        Если файл не найден или при ошибке чтения — возвращает пустой список.
-        """
         try:
             with open(user_agents_file, 'r', encoding='utf-8') as f:
                 return [line.strip() for line in f if line.strip()]
         except Exception as e:
-            logging.error(f"Failed to load user agents from {user_agents_file}: {e}")
+            self.logger.error(f"Failed to load user agents from {user_agents_file}: {e}")
             return []
 
     async def _ensure_session(self):
-        """
-        Ленивая инициализация aiohttp.ClientSession
-        """
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=self._timeout_seconds)
+            if self.network_cfg and self.network_cfg.use_tor:
+                connector = ProxyConnector.from_url(self.network_cfg.tor_socks_url)
+                self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+                self.logger.info(f"Fetcher: using Tor SOCKS proxy {self.network_cfg.tor_socks_url}")
+            else:
+                raise RuntimeError("Tor must be enabled — direct connection is blocked for this environment.")
 
-    async def fetch(self, url: str) -> Tuple[str | None, str]:
-        """
-        Выполняет GET-запрос по URL.
-        Возвращает кортеж (content, final_url).
-        Если запрос не удался — content будет None.
-        """
+
+
+    async def fetch(self, url: str) -> Tuple[Optional[str], str, Optional[int]]:
+
+        """Returns (content_or_None, final_url_or_input)."""
+        self.logger.debug(f"Fetching URL: {url}")
         await self._ensure_session()
 
-        # Ограничение числа одновременных запросов, если нужно.
-        # Если semaphore не нужен, можно удалить этот блок.
-        # async with self.semaphore:
+        normalized = normalize_url(url)
+        if not normalized:
+            self.logger.warning("URL not normalized / skipped: %s", url)
+            return None, url
+
         try:
-            headers = {'User-Agent': rotate_user_agent(self.user_agents)}
-            async with self.session.get(url, headers=headers) as response:
+            headers = {'User-Agent': rotate_user_agent(self.user_agents) or "JTK-Crawler/1.0"}
+            async with self.session.get(normalized, headers=headers) as response:
                 if response.status != 200:
-                    logging.warning(f"Request to {url} failed with status {response.status}")
+                    self.logger.warning(f"Request to {normalized} failed with status {response.status}")
                     return None, str(response.url)
 
-                content = await response.text()
-                final_url = str(response.url)
+                raw = await response.read()
+                detected = chardet.detect(raw)
+                encoding = detected.get('encoding') or response.charset or 'latin-1'
+                try:
+                    content = raw.decode(encoding, errors='strict')
+                except (LookupError, UnicodeDecodeError):
+                    content = raw.decode(encoding, errors='replace')
 
-                # Задержка между запросами, чтобы не перегружать сервер
-                if self.rate_limit > 0:
+                final_url = str(response.url)
+                self.logger.debug(f"Decoded content length: {len(content)} chars from {final_url}")
+                status = response.status
+
+                if self.rate_limit and self.rate_limit > 0:
                     await asyncio.sleep(self.rate_limit)
 
-                return content, final_url
+                return content, final_url, status
 
-        except ClientError as e:
-            logging.error(f"Network error while fetching {url}: {e}")
+        except InvalidURL as e:
+            self.logger.exception("InvalidURL fetching %s: %s", normalized, e)
             return None, url
-        
-        if not response or response.status != 200:
-            logger.warning(f"Bad response for {domain}: {response}")
-            return None
+        except (ClientConnectorError, asyncio.TimeoutError) as e:
+            self.logger.exception("Connection/Timeout error fetching %s: %s", normalized, e)
+            return None, normalized
+        except ClientError as e:
+            self.logger.exception("ClientError fetching %s: %s", normalized, e)
+            return None, normalized
+        except Exception as e:
+            # на всякий случай — логируем полную трассировку
+            self.logger.exception("Unexpected error while fetching %s: %s", normalized, e)
+            return None, normalized
 
     async def close(self):
-        """
-        Закрывает сессию при завершении работы.
-        """
         if self.session:
-            await self.session.close()
+            try:
+                await self.session.close()
+            except Exception:
+                self.logger.exception("Error closing session")
+            finally:
+                self.session = None

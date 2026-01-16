@@ -17,3 +17,7 @@ Thumbs.db
 
 # Caches
 .cache/
+
+#metrics and result
+metrics.json
+result.json

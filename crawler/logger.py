@@ -1,7 +1,18 @@
-# crawler/logger.py
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+class ProgressFilter(logging.Filter):
+    """
+    Фильтр для удаления сообщений о прогрессе из логов.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        # Фильтруем строки с 'Progress:' или '[Progress]'
+        if 'Progress:' in msg or '[Progress]' in msg:
+            return False
+        return True
+
 
 def init_logger(cfg):
     log_path = Path(cfg.path)
@@ -21,6 +32,8 @@ def init_logger(cfg):
     )
     file_handler.setFormatter(file_formatter)
     file_handler.setLevel(logging.INFO)
+    # Применяем фильтр к файловому логеру
+    file_handler.addFilter(ProgressFilter())
 
     # Логирование в консоль на DEBUG и выше
     console_handler = logging.StreamHandler()
@@ -30,6 +43,8 @@ def init_logger(cfg):
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     console_handler.setFormatter(console_formatter)
+    # Применяем фильтр к консольному логеру
+    console_handler.addFilter(ProgressFilter())
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)      # корневой логгер на DEBUG

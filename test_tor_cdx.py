@@ -1,3 +1,4 @@
+# test_tor_cdx.py (ФИНАЛЬНАЯ ВЕРСИЯ)
 import aiohttp
 import asyncio
 import json
@@ -6,7 +7,7 @@ from urllib.parse import quote, unquote, urlencode
 from typing import List, Optional, Tuple
 from aiohttp_socks import ProxyConnector
 
-
+# --- НАЧАЛО КЛАССА WAYBACKCDXCLIENT (ИСПРАВЛЕННАЯ ВЕРСИЯ) ---
 class WaybackCDXClient:
     CDX_API = "https://web.archive.org/cdx/search/cdx"
 
@@ -212,6 +213,18 @@ class WaybackCDXClient:
             self.logger.exception("ClientError while requesting CDX")
             raise
 
+    def _build_wayback_url(self, timestamp: str, original: str) -> Optional[str]:
+        try:
+            orig = unquote(original)
+        except Exception:
+            orig = original
+
+        if "*" in orig:
+            return None
+
+        encoded = quote(orig, safe=":/")
+        return f"https://web.archive.org/web/{timestamp}id_/{encoded}"
+
 
     def _build_wayback_url(self, timestamp: str, original: str) -> Optional[str]:
         # Раздекодируем исходный original (если он закодирован)
@@ -229,62 +242,40 @@ class WaybackCDXClient:
         encoded = quote(orig, safe=":/")
         return f"https://web.archive.org/web/{timestamp}id_/{encoded}"
 
-class CDXManager:
-    def __init__(self, cfg, storage, rate_limiter=None):
-        self.cfg = cfg
-        self.storage = storage
-        self.rate_limiter = rate_limiter
-        self.client: Optional[WaybackCDXClient] = None
-        self.logger = logging.getLogger("CDXManager")
 
-    async def initialize(self, session: aiohttp.ClientSession):
-        self.client = WaybackCDXClient(
+
+
+async def test_tor_request():
+    logging.basicConfig(level=logging.DEBUG)
+
+    proxy = "socks5://127.0.0.1:9050"
+    connector = ProxyConnector.from_url(proxy, rdns=True)
+
+    # Создаем объект таймаута
+    timeout = aiohttp.ClientTimeout(total=90) # 90 секунд
+
+    # Передаем коннектор и таймаут в СЕССИЮ
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        # В WaybackCDXClient больше не нужно передавать ничего, кроме сессии
+        client = WaybackCDXClient(
             session=session,
-            max_retries=self.cfg.max_retries,
-            backoff_factor=self.cfg.backoff_factor,
-            request_timeout=self.cfg.request_timeout,
-            max_pages=self.cfg.max_pages,
-            page_size=self.cfg.page_size
+            max_retries=2
         )
 
-    async def get_seed_urls(self) -> List[str]:
-        if not self.client:
-            raise RuntimeError("CDXClient not initialized")
+        domain = "pya.cc"
+        print(f"🔍 Тестируем домен {domain} через Tor...")
 
-        domains = self._load_domains()
-        self.logger.info(f"Will bootstrap seeds for {len(domains)} domains")
-
-        all_urls: List[str] = []
-        for domain in domains:
-            try:
-                self.logger.info(f"Fetching CDX for {domain}")
-                urls = await self.client.fetch_snapshots(domain)
-                self.logger.info(f"  → raw snapshots: {len(urls)}")
-
-                filtered = await self._filter_new_urls(urls)
-                self.logger.info(f"  → new (unvisited): {len(filtered)}")
-
-                await self.storage.stats.add_snapshots(
-                    total=len(urls),
-                    new=len(filtered)
-                )
-
-                all_urls.extend(filtered)
-
-            except Exception as e:
-                self.logger.error(f"Failed to process domain {domain}: {str(e)}")
-                await self.storage.stats.add_failed_domain(domain)
-                continue
-
-        return all_urls
-
-    def _load_domains(self) -> List[str]:
         try:
-            with open(self.cfg.target_domains_file, "r") as f:
-                return [line.strip() for line in f if line.strip()]
-        except FileNotFoundError:
-            self.logger.error("Domains file not found at %s", self.cfg.target_domains_file)
-            return []
+            snapshots = await client.fetch_snapshots(
+                domain,
+                from_date="20050101000000",
+                to_date="20051231235959"
+            )
+            print(f"✅ Получено {len(snapshots)} снимков")
+            if snapshots:
+                print("Пример:", snapshots[0])
+        except Exception as e:
+            print("❌ Ошибка:", e)
 
-    async def _filter_new_urls(self, urls: List[str]) -> List[str]:
-        return [url for url in urls if not self.storage.is_visited(url)]
+if __name__ == "__main__":
+    asyncio.run(test_tor_request())

@@ -29,9 +29,20 @@ class Storage:
         # Очередь для кэширования старых записей
         self.cache_queue = deque(maxlen=self.bloom_capacity)
         
-    async def save_matches(self, url: str, keywords: List[str]):
-        async with self.lock:
-            self.matches[url].extend(keywords)
+    async def save_matches(self, url: str, matches: list):
+        """Сохраняет найденные совпадения в память и делает автосброс каждые N секунд."""
+        if not matches:
+            return
+
+        self._matches[url] = matches
+
+        # Проверка, пора ли сбрасывать на диск
+        now = time.time()
+        if now - self.last_save >= self.auto_save_interval:
+            await self.persist_matches()
+            self.last_save = now
+
+    
 
     def is_visited(self, url: str) -> bool:
         """
@@ -104,6 +115,20 @@ class Storage:
         return os.path.join(self.cache_dir, f"{hash_url}.html")
     
     async def persist_matches(self):
-        with open("results.json", "w") as f:
-            json.dump(dict(self.matches), f)
+        """Сбрасывает все накопленные совпадения в result.json (в читаемом виде)."""
+        try:
+            if not self._matches:
+                return
+
+            # Создаём папку, если нужно
+            os.makedirs(os.path.dirname(self.result_path), exist_ok=True)
+
+            # Сохраняем в читаемом виде (indent=2)
+            with open(self.result_path, "w", encoding="utf-8") as f:
+                json.dump(self._matches, f, indent=2, ensure_ascii=False)
+
+            self.logger.info(f"💾 Saved {len(self._matches)} URLs to {self.result_path}")
+
+        except Exception as e:
+            self.logger.error(f"Error saving results: {e}")
     
